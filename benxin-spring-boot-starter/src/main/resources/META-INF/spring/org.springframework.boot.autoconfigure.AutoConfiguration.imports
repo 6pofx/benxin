@@ -1,0 +1,3 @@
+com.benxin.llm.spring.LlmAutoConfiguration
+com.benxin.llm.spring.LlmAgentAutoConfiguration
+com.benxin.llm.spring.LlmWebAutoConfiguration

@@ -1,0 +1,36 @@
+# 统一换行策略。
+#
+# 为什么要在仓库里显式声明：core.autocrlf 是每位开发者各自的本地设置，
+# 靠它意味着"同一次检出在不同机器上得到不同换行符"，进而产生整文件级别的假 diff。
+# 这里把规则固化进仓库，任何人克隆下来行为都一致。
+#
+# 仓库内一律 LF；Java / Maven 生态的工具链在 Windows 上也能正确处理 LF。
+* text=auto eol=lf
+
+# 源码与配置显式声明为文本，避免被误判为二进制
+*.java   text eol=lf
+*.xml    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+*.properties text eol=lf
+*.imports    text eol=lf
+
+# Windows 批处理必须保持 CRLF，否则 cmd.exe 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何换行转换
+*.jar   binary
+*.war   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+
+# 锁文件与生成物：在 diff 中折叠，减少评审噪音
+pom.xml.lock -diff

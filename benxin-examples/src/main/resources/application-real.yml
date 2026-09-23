@@ -1,0 +1,72 @@
+# 真实模型配置示例。
+#
+# 用法：
+#   set DEEPSEEK_KEY=sk-xxx
+#   mvn spring-boot:run -Dspring-boot.run.profiles=real
+#
+# 三种主流协议各给一个示例。注意「协议」与「厂商」是正交的：
+# 任何兼容 OpenAI Chat Completions 的服务（DeepSeek / 通义千问 / Kimi / GLM /
+# vLLM / Ollama / OneAPI…）都只需要改 base-url 与 model 两个字段。
+llm:
+  default-model: deepseek
+
+  models:
+    # ── 协议一：OpenAI Chat Completions ────────────────────────────────
+    deepseek:
+      protocol: openai
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_KEY:}
+      model: deepseek-chat
+      temperature: 0.3
+      max-tokens: 4096
+      primary: true
+      order: 1
+      # 透传到请求体顶层的厂商私有参数
+      # extra:
+      #   top_k: 20
+
+    openai:
+      protocol: openai
+      base-url: https://api.openai.com
+      api-key: ${OPENAI_KEY:}
+      model: gpt-4o
+      order: 2
+
+    qwen:
+      protocol: openai
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      api-key: ${DASHSCOPE_KEY:}
+      model: qwen-max
+
+    ollama:
+      protocol: openai
+      base-url: http://localhost:11434
+      api-key: ollama
+      model: qwen2.5:14b
+      max-retries: 0
+
+    # ── 协议二：Anthropic Messages ─────────────────────────────────────
+    claude:
+      protocol: anthropic
+      base-url: https://api.anthropic.com
+      api-key: ${ANTHROPIC_KEY:}
+      model: claude-sonnet-4-5
+      # Anthropic 的 max_tokens 是必填项，这里给的默认值会被自动兜底
+      max-tokens: 8192
+      headers:
+        anthropic-beta: fine-grained-tool-streaming-2025-05-14
+
+    # ── 协议三：Google Gemini ──────────────────────────────────────────
+    gemini:
+      protocol: gemini
+      base-url: https://generativelanguage.googleapis.com
+      api-key: ${GEMINI_KEY:}
+      model: gemini-2.5-pro
+
+  agent:
+    default-loop: claude-code
+    logging-listener: true
+
+benxin:
+  mock:
+    enabled: false

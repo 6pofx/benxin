@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.benxin</groupId>
+    <artifactId>benxin</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+
+    <name>benxin</name>
+    <description>本心 —— 声明式 LLM Agent 调用插件：一切皆可替换（模型 / 协议 / Loop / 工具 / 上下文 / 记忆 / 提示词 / 拦截器）</description>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>wyx</id>
+            <name>wyx</name>
+            <email>wyx2631641458@163.com</email>
+        </developer>
+    </developers>
+
+    <modules>
+        <module>benxin-core</module>
+        <module>benxin-spring-boot-starter</module>
+        <module>benxin-examples</module>
+    </modules>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.release>17</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <benxin.version>1.0.0</benxin.version>
+        <maven-compiler-plugin.version>3.14.0</maven-compiler-plugin.version>
+        <!-- Spring Boot 3.5.5 管理的 Jackson 版本，此处仅作文档化引用 -->
+        <jackson.version>2.19.2</jackson.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.benxin</groupId>
+                <artifactId>benxin-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.benxin</groupId>
+                <artifactId>benxin-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <!--
+                          JDK 21+ 默认禁止动态加载 agent，Mockito 的 inline mock maker 会自附加失败；
+                          Spring Boot 的测试监听器一启动就用到 Mockito，因此这里显式放行。
+                          这两个参数对不使用 Mockito 的测试没有任何副作用。
+                        -->
+                        <argLine>-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <release>${maven.compiler.release}</release>
+                        <encoding>UTF-8</encoding>
+                        <!-- 反射读取工具方法参数名所必需 -->
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

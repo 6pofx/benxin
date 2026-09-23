@@ -1,0 +1,49 @@
+# ---- 构建产物 ----
+target/
+build/
+out/
+*.class
+*.jar
+*.war
+*.ear
+
+# Maven 版本/发布插件的中间产物
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+.flattened-pom.xml
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+*.swp
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- 本心运行期与临时产物 ----
+# .verify 是开发期用来做隔离编译校验的目录，不应进版本库
+.verify/
+.build-probe/
+*.log
+logs/
+
+# ---- 密钥 ----
+# 本心支持从环境变量注入 API Key；这里把可能被误提交的本地配置一并挡掉
+*.local.yml
+*.local.yaml
+application-secret.*
+.env

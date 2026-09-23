@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: benxin-examples
+
+llm:
+  # 默认模型名，对应下面 models 的 key，或某个 LlmModel bean 的 name()
+  default-model: mock
+
+  agent:
+    # 全局默认 Loop；@LlmAgent(loop = "...") 可逐个覆盖
+    default-loop: dsh-minimal
+    max-steps: 12
+    # 单次运行步数硬上限，防止误配置成死循环
+    hard-max-steps: 200
+    logging-listener: true
+    approval-policy: on-request
+
+  tools:
+    # ⚠️ 内置文件/命令工具默认关闭。它们能真实读写本地文件、执行本地命令，
+    #    开启前请确认 llm.tools.workdir 与审批策略符合预期。
+    builtin-enabled: false
+    workdir: .
+    allow-write: false
+    allow-exec: false
+    exec-timeout: 60s
+    max-output-chars: 30000
+
+  # HTTP 接口默认关闭；打开后会暴露 /llm/agents/** 等端点（无鉴权，请自行加保护）
+  web:
+    enabled: true
+
+benxin:
+  demo:
+    enabled: true
+  mock:
+    enabled: true
+
+logging:
+  level:
+    root: WARN
+    com.benxin: INFO
+  pattern:
+    console: "%d{HH:mm:ss} %-5level %-42.42logger{0} : %msg%n"
