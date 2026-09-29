@@ -1,0 +1,52 @@
+##
+## Spring 配置驱动的声明式工作流示例。
+## 对应的 Spring 配置是：
+##   llm.workflows.code-review.location=classpath:workflows/code-review.yml
+## 注册后的 Loop 名是 workflow:code-review。
+##
+name: code-review
+description: 代码评审工作流（配置驱动示例）
+
+nodes:
+  - id: begin
+    type: start
+    prompt: "待评审的内容：${input}"
+
+  - id: analyze
+    type: agent
+    instruction: 你是严格的代码评审者，只指出真实存在的问题。
+    prompt: |
+      请分析下面的内容，列出问题清单；若发现严重缺陷请显式写出「严重」二字。
+      ${begin}
+
+  - id: route
+    type: branch
+
+  - id: fix
+    type: agent
+    prompt: |
+      以下问题被判定为严重，请给出具体修复方案：
+      ${analyze}
+
+  - id: report
+    type: end
+    output: |
+      评审结论：
+      ${analyze}
+
+      修复建议：
+      ${fix:-（无需修复）}
+
+edges:
+  - from: begin
+    to: analyze
+  - from: analyze
+    to: route
+  # 顺序即优先级：先判严重，否则落最后一条默认边
+  - from: route
+    to: fix
+    when: "${analyze} contains 严重"
+  - from: route
+    to: report
+  - from: fix
+    to: report

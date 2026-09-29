@@ -34,6 +34,15 @@ public class LlmProperties {
     /** 内置工具与沙箱。 */
     private final ToolProperties tools = new ToolProperties();
 
+    /**
+     * 声明式工作流定义。
+     *
+     * <p>每个条目会注册成一个 Loop，名字是 {@code workflow:<key>}，
+     * 于是 {@code @LlmAgent(loop = "workflow:code-review")} 直接可用 ——
+     * 定义文件因此不需要写任何 Java 代码就能被 Agent 使用。</p>
+     */
+    private Map<String, WorkflowProperties> workflows = new LinkedHashMap<>();
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -64,6 +73,56 @@ public class LlmProperties {
 
     public ToolProperties getTools() {
         return tools;
+    }
+
+    public Map<String, WorkflowProperties> getWorkflows() {
+        return workflows;
+    }
+
+    public void setWorkflows(Map<String, WorkflowProperties> workflows) {
+        this.workflows = workflows == null ? new LinkedHashMap<>() : workflows;
+    }
+
+    /**
+     * 单个声明式工作流的配置。
+     *
+     * <pre>{@code
+     * llm:
+     *   workflows:
+     *     code-review:
+     *       location: classpath:workflows/code-review.yml
+     *     quick-fix:
+     *       inline: |
+     *         name: quick-fix
+     *         nodes:
+     *           - id: a
+     *             prompt: "修正：${input}"
+     *         edges: []
+     * }</pre>
+     */
+    public static class WorkflowProperties {
+
+        /** 定义文件位置，支持 Spring 的 {@code classpath:} / {@code file:} / 相对路径。 */
+        private String location;
+
+        /** 直接内联的定义文本（YAML 或 JSON）；与 {@link #location} 二选一。 */
+        private String inline;
+
+        public String getLocation() {
+            return location;
+        }
+
+        public void setLocation(String location) {
+            this.location = location;
+        }
+
+        public String getInline() {
+            return inline;
+        }
+
+        public void setInline(String inline) {
+            this.inline = inline;
+        }
     }
 
     /** 单个模型端点的配置。 */

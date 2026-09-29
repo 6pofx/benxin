@@ -26,6 +26,8 @@ import java.util.regex.Pattern;
  * <p>它用一组明确的规则模拟"模型决策"，规则本身也顺便成了框架行为的说明书：</p>
  * <ol>
  *   <li>用户消息里出现 {@code #tool:<名字> <JSON参数>} → 发起指定的工具调用；</li>
+ *   <li>提示词里出现 {@code 编号计划} / {@code 验收者} / {@code 验收未通过}
+ *       → 返回对应编排类 Loop（{@code staged} 等）能解析的固定回答；</li>
  *   <li>还没有任何工具结果、且请求里带了工具、且用户在问需要外部信息的问题
  *       （含"天气"、"汇率"、"算"等关键词）→ 调用最匹配的一个工具；</li>
  *   <li>已经有工具结果 → 基于结果组织最终回答；</li>
@@ -91,7 +93,24 @@ public class MockLlmModel implements LlmModel {
             return toolCall(forced.group(1), args);
         }
 
-        // 规则 2：需要外部信息且尚未取过
+        // 规则 2：编排类 Loop 的"内部请求"必须给出它们能解析的回答。
+        // staged / workflow 这些 Loop 靠解析模型输出来推进阶段；如果这里回落到通用兜底文案，
+        // 它们会集体降级成普通 tool-calling 循环，离线演示就看不到真正的流程了。
+        // 这几条必须排在"挑工具"规则之前 —— 那些提示词里含有"现在"这类会误触发工具的词。
+        if (userText.contains("编号计划")) {
+            return text("""
+                    1. 明确目标与验收标准
+                    2. 收集与主题相关的关键信息
+                    3. 形成结论，并逐条给出依据""");
+        }
+        if (userText.contains("验收者")) {
+            return text("结论：通过\n（离线 Mock 模型默认判定为达标，仅用于演示校验闸门确实被执行过。）");
+        }
+        if (userText.contains("验收未通过")) {
+            return text("已按验收意见逐条修正。");
+        }
+
+        // 规则 3：需要外部信息且尚未取过
         if (!hasToolResult && request.hasTools()) {
             ToolSpec picked = pickTool(request.tools(), userText);
             if (picked != null) {
@@ -99,12 +118,12 @@ public class MockLlmModel implements LlmModel {
             }
         }
 
-        // 规则 3：基于工具结果作答
+        // 规则 4：基于工具结果作答
         if (hasToolResult) {
             return text(answerFromToolResults(request));
         }
 
-        // 规则 4：要求 JSON（演示声明式接口的 DTO 返回值）
+        // 规则 5：要求 JSON（演示声明式接口的 DTO 返回值）
         if (containsJsonHint(systemText) || containsJsonHint(userText)) {
             return text("""
                     {
@@ -114,7 +133,7 @@ public class MockLlmModel implements LlmModel {
                     }""");
         }
 
-        // 规则 5：兜底
+        // 规则 6：兜底
         return text("（Mock 模型）我收到了你的请求：" + abbreviate(userText, 60)
                 + "。当前没有可用的外部信息，因此直接作答。想让我调用工具，可以写成 "
                 + "#tool:<工具名> {\"参数\":\"值\"} 的形式。");

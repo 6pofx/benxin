@@ -20,7 +20,8 @@ public final class BuiltinLoops {
 
     /** 内置 Loop 名，按推荐了解顺序排列。 */
     public static final List<String> NAMES =
-            List.of("dsh-minimal", "react", "claude-code", "codex", "plan-execute", "reflexion");
+            List.of("dsh-minimal", "react", "claude-code", "codex", "plan-execute", "reflexion",
+                    "workflow", "staged");
 
     private BuiltinLoops() {
     }
@@ -33,6 +34,10 @@ public final class BuiltinLoops {
         register(registry, new CodexLoop());
         register(registry, new PlanExecuteLoop());
         register(registry, new ReflexionLoop());
+        // 工作流模式的两条路线：图由外部定义 vs 流程由代码固化。
+        // 注册名里带冒号的 workflow:<name> 由 Spring 侧按 llm.workflows.* 逐个追加。
+        register(registry, new WorkflowLoop());
+        register(registry, new StagedLoop());
         if (registry.defaultName() == null) {
             registry.setDefault(DEFAULT_LOOP);
         }

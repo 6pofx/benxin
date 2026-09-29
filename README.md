@@ -23,6 +23,7 @@ public interface WeatherAssistant {
 - [注解速查](#注解速查)
 - [三种主流 LLM API 协议](#三种主流-llm-api-协议)
 - [内置 Agent Loop](#内置-agent-loop)
+- [工作流模式](#工作流模式)
 - [工具](#工具)
 - [替换任意一个切面](#替换任意一个切面)
 - [可观测性](#可观测性)
@@ -41,7 +42,7 @@ public interface WeatherAssistant {
 | 模型 | `LlmModel` | `OpenAiModel` / `AnthropicModel` / `GeminiModel` | 定义 `LlmModel` bean，或写 `llm.models.*` |
 | 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` | 定义 `ProtocolCodec` bean |
 | 传输 | `HttpTransport` | `JdkHttpTransport`（零依赖） | 定义 `HttpTransport` bean（OkHttp / WebClient / 测试桩） |
-| **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` | `@LlmLoop("名字")` |
+| **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged` | `@LlmLoop("名字")` |
 | **工具** | `ToolCallback` | 反射适配器 + 8 个内置工具 | `@LlmTool` 注解方法 |
 | 上下文 | `ContextManager` | `DefaultContextManager` | 定义 bean |
 | 压缩 | `ContextCompactor` | `SummarizingCompactor` / `SlidingWindowCompactor` | 定义 bean |
@@ -267,6 +268,8 @@ public class MyBedrockCodec implements ProtocolCodec {
 | `codex` | OpenAI Codex | **turn 制**：`update_plan` 出计划 → `apply_patch` 做最小改动 → 命令验证；**如实告知沙箱权限边界**；未验证则给一次补验证的机会 |
 | `plan-execute` | 经典范式 | 第一步强制产出编号计划，之后逐步推进并回显进度 |
 | `reflexion` | 经典范式 | 执行 → 自省评分 → 低于阈值则带着批评重做 |
+| `workflow` | 声明式编排 | **下一步由图决定，而不是模型**：节点与边写在 YAML/JSON 里，分支条件是表达式。可审计、可复现、成本可控 |
+| `staged` | 结构化编排 | 规划 → 执行 → **校验** → 修复 → 汇总；汇总前强制验收，不通过则带问题回到修复阶段 |
 
 ### 选一个
 
@@ -301,6 +304,152 @@ public class MyLoop extends AbstractAgentLoop {
 
 `LoopContext` 提供：`callModel()` / `executeTools()` / `callTool()` / `append()` /
 `spawnSubAgent()` / `emit()` / `messages()` / `attributes()` / `outOfBudget()`。
+
+---
+
+## 工作流模式
+
+其它 Loop 里，"下一步做什么"由模型当场决定。工作流模式把这件事反过来：
+**模型只负责填内容，控制流由我们决定**。本心给了两条路线，按"流程定不定得下来"选。
+
+### 一、声明式：`workflow` —— 图写在 YAML 里
+
+```yaml
+# llm.workflows.release-notes.location=classpath:workflows/release-notes.yml
+name: release-notes
+nodes:
+  - id: begin
+    type: start
+    prompt: "请为这次变更写发布说明：\n${input}"
+
+  - id: classify            # agent 节点：一次完整的子任务（内部仍是完整工具循环）
+    type: agent
+    instruction: 你是发布经理，只关注用户能感知到的变化。
+    prompt: "归纳要点：\n${begin}"
+
+  - id: route
+    type: branch            # 纯路由：自己不产生输出，只按出边条件挑一条
+
+  - id: urgent
+    type: agent
+    prompt: "补充回滚方案与影响范围：\n${classify}"
+
+  - id: stamp
+    type: tool              # 不经过模型，直接调工具
+    tool: get_current_time
+
+  - id: mark
+    type: set               # 写变量，供后续模板引用
+    set:
+      channel: 加急通道
+
+  - id: report
+    type: end               # 渲染 output 作为最终答案
+    output: "通道：${channel}\n时间：${stamp}\n\n${classify}"
+
+edges:
+  - from: begin
+    to: classify
+  - from: classify
+    to: route
+  # 出边按声明顺序取第一条成立的 —— 顺序即优先级，默认边放最后
+  - from: route
+    to: urgent
+    when: "${input} contains 紧急"
+  - from: route
+    to: mark
+  - from: urgent
+    to: mark
+  - from: mark
+    to: stamp
+  - from: stamp
+    to: report
+```
+
+用它不需要写任何 Java —— 声明一眼就能引用：
+
+```java
+@LlmAgent(model = "mock", loop = "workflow:release-notes", tools = {DevTools.class})
+public interface ReleaseNoteWriter {
+    String draft(String changeDescription);
+}
+```
+
+**六种节点**：`start`（透传输入）、`agent`（一次模型子任务）、`tool`（直调工具）、
+`branch`（按条件路由）、`set`（写变量）、`end`（产出最终答案）。
+**循环不需要专门的节点**：把边指回上游即可。
+
+**条件表达式**是一小门贴近自然语言的语言，支持 `==` `!=` `>` `>=` `<` `<=`
+`contains` `matches`（正则）`is empty` `exists` `missing`，以及
+`not` / `and` / `or` 与括号（也接受 `!` `&&` `||` 与 `非` / `且` / `或`）：
+
+```
+${verdict} == 通过
+${analyze} contains 严重 and ${count} > 10
+${log} matches (?i)error|异常
+${summary} is not empty
+```
+
+**模板**用 `${名称}` 取值：`${input}` 是任务原文，`${last}` 是上一个输出，
+`${error}` 是上次失败原因，其余是节点 id 或 `set` 写入的变量。
+`${名称:-兜底值}` 提供默认值；**取不到的占位符保留原文**，让拼写错误一眼可见，
+而不是静默变成空串。
+
+**三道防线**：步数预算拦住"模型一直调工具"；单节点访问上限
+（`maxVisitsPerNode`，默认 100）拦住"不调模型的死循环"（预算对后者完全无效）；
+节点级 `retry` 与 `continueOnError` 把"偶发失败"和"整张图崩掉"分开 ——
+后者还能让出边读 `${error}` 走补偿分支。
+
+定义也可以在调用时逐次传入，同一个 Loop 跑不同的图：
+
+```java
+agent.call(input, sessionId, Map.of("benxin.workflow", yamlOrJsonText), stream);
+```
+
+### 二、结构化编排：`staged` —— 流程固化在代码里
+
+```
+PLAN ──► EXECUTE ──► VERIFY ──通过──► SYNTHESIZE ──► 结束
+                       │  ▲
+                     不通过 │
+                       ▼  │
+                     REPAIR ┘（最多 maxRepairRounds 轮）
+```
+
+与 `plan-execute` 只差一件事，但很关键：**它多了一道验收闸门**。
+plan-execute 在最后一步走完就直接汇总，于是"步骤都跑了"和"任务真的完成了"被当成一回事 ——
+而这两件事经常不是一回事。`staged` 在汇总前让模型换个身份独立复查一次，
+不通过就带着具体问题回到修复阶段。
+
+```java
+@LlmAgent(model = "deepseek", loop = "staged", maxSteps = 16)
+public interface Analyst {
+    String analyze(String topic);
+}
+```
+
+阶段与结论都会留档，便于展示与复盘：
+
+```java
+result.attributes().get("benxin.staged.plan");        // 计划步骤
+result.attributes().get("benxin.staged.verdict");     // pass / fail
+result.attributes().get("benxin.staged.stage");       // 最终阶段
+result.attributes().get("benxin.staged.repair-rounds");
+```
+
+自定义强度：`new StagedLoop(verifyEnabled, maxRepairRounds)` ——
+关掉验收就退化成"带汇总的 plan-execute"。
+
+### 什么时候用哪条
+
+| | 声明式 `workflow` | 结构化编排 `staged` |
+|---|---|---|
+| 流程 | 事先画得出来 | 任务形态多变 |
+| 控制流 | 图（可审计、可复现） | 代码里的阶段机 |
+| 改流程 | 改 YAML，不动 Java | 改代码 |
+| 适合 | 审批、发布、评测等固定流程 | 分析、调研等开放式任务 |
+
+两者都不适合探索性任务 —— 那种场景应该用 `react`。
 
 ---
 

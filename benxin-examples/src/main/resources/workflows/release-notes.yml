@@ -1,0 +1,84 @@
+##
+## 声明式工作流示例：把"发布说明怎么写"这件事画成一张图。
+##
+## 由 application.yml 的 llm.workflows.release-notes.location 指向本文件，
+## 启动后即可用 @LlmAgent(loop = "workflow:release-notes") 引用。
+##
+## 这张图刻意覆盖了全部六种节点类型与三种边：
+##   start → agent → branch → agent → set → tool → end
+##   条件边（紧急）+ 默认边 + 无条件边
+##
+name: release-notes
+description: 发布说明工作流：归类 → 分支（紧急/常规）→ 打时间戳 → 汇总
+
+nodes:
+  - id: begin
+    type: start
+    prompt: "请为下面这次变更撰写发布说明：\n${input}"
+
+  - id: classify
+    type: agent
+    # instruction 会作为前缀拼在 prompt 之前，用来给这一步定角色
+    instruction: 你是发布经理，只关注"用户能感知到什么变化"。
+    prompt: |
+      请归纳这次变更的要点。
+      ${begin}
+
+  - id: route
+    type: branch
+
+  - id: urgent
+    type: agent
+    prompt: |
+      这次变更被判定为紧急。请在要点之外补充三件事：
+      回滚方案、影响范围、需要提前通知的角色。
+      ${classify}
+
+  # set 节点用来把"走了哪条路"记成变量，供最后的汇总引用
+  - id: stamp-urgent
+    type: set
+    set:
+      channel: 加急通道（发布后 30 分钟内需值守）
+
+  - id: stamp-normal
+    type: set
+    set:
+      channel: 常规通道（随下一次例行发布）
+
+  # tool 节点不经过模型，直接调用已注册的工具拿发布时间
+  - id: stamp
+    type: tool
+    tool: get_current_time
+
+  - id: report
+    type: end
+    output: |
+      ────────── 发布说明 ──────────
+      通道：${channel}
+      生成时间：${stamp}
+
+      【要点】
+      ${classify}
+
+      【加急补充】
+      ${urgent:-（本次为常规发布，无需加急补充）}
+
+edges:
+  - from: begin
+    to: classify
+  - from: classify
+    to: route
+  # 出边按声明顺序取第一条成立的：先判紧急，否则落下面那条默认边
+  - from: route
+    to: urgent
+    when: "${input} contains 紧急"
+  - from: route
+    to: stamp-normal
+  - from: urgent
+    to: stamp-urgent
+  - from: stamp-urgent
+    to: stamp
+  - from: stamp-normal
+    to: stamp
+  - from: stamp
+    to: report

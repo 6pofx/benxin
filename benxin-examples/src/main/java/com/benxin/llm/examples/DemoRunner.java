@@ -9,6 +9,7 @@ import com.benxin.llm.core.model.ModelRegistry;
 import com.benxin.llm.core.tool.ToolScanner;
 import com.benxin.llm.examples.agent.CodeReviewer;
 import com.benxin.llm.examples.agent.PatchEngineer;
+import com.benxin.llm.examples.agent.ReleaseNoteWriter;
 import com.benxin.llm.examples.agent.Translator;
 import com.benxin.llm.examples.agent.WeatherAssistant;
 import com.benxin.llm.examples.guard.AuditInterceptor;
@@ -39,6 +40,7 @@ public class DemoRunner implements ApplicationRunner {
     private final CodeReviewer codeReviewer;
     private final Translator translator;
     private final PatchEngineer patchEngineer;
+    private final ReleaseNoteWriter releaseNoteWriter;
     private final AuditInterceptor auditInterceptor;
     private final AgentRegistry agentRegistry;
     private final LlmAgentFactory agentFactory;
@@ -51,6 +53,7 @@ public class DemoRunner implements ApplicationRunner {
                       CodeReviewer codeReviewer,
                       Translator translator,
                       PatchEngineer patchEngineer,
+                      ReleaseNoteWriter releaseNoteWriter,
                       AuditInterceptor auditInterceptor,
                       AgentRegistry agentRegistry,
                       LlmAgentFactory agentFactory,
@@ -62,6 +65,7 @@ public class DemoRunner implements ApplicationRunner {
         this.codeReviewer = codeReviewer;
         this.translator = translator;
         this.patchEngineer = patchEngineer;
+        this.releaseNoteWriter = releaseNoteWriter;
         this.auditInterceptor = auditInterceptor;
         this.agentRegistry = agentRegistry;
         this.agentFactory = agentFactory;
@@ -80,6 +84,8 @@ public class DemoRunner implements ApplicationRunner {
         demo4Streaming();
         demo5TypedReturn();
         demo6ProgrammaticAssembly();
+        demo7DeclarativeWorkflow();
+        demo8StagedWorkflow();
         footer();
     }
 
@@ -179,6 +185,45 @@ public class DemoRunner implements ApplicationRunner {
             AgentResult result = agent.call("现在几点了？");
             System.out.println("装配结果: " + agent);
             System.out.println("回答: " + result.text());
+            System.out.println("步数 " + result.steps() + " / 用时 " + result.durationMillis() + " ms");
+        } catch (RuntimeException e) {
+            failed(e);
+        }
+    }
+
+    /**
+     * ⑦ 声明式工作流：流程写在一张 YAML 图里，模型只负责填内容。
+     *
+     * <p>同一张图跑两次，输入里有没有"紧急"决定了走哪条分支 —— 而这条判断是
+     * <b>我们写的表达式</b>，不是模型的自述，因此两条路径都可以被复现与审计。</p>
+     */
+    private void demo7DeclarativeWorkflow() {
+        section("⑦ 声明式工作流 —— 流程由 YAML 图决定，模型只填内容");
+        System.out.println("已注册工作流 Loop: " + loopRegistry.names().stream()
+                .filter(n -> n.startsWith("workflow:"))
+                .toList());
+        try {
+            System.out.println("【输入不含「紧急」→ 走默认边】");
+            System.out.println(releaseNoteWriter.draft("新增了导出 CSV 的功能"));
+            System.out.println();
+            System.out.println("【输入含「紧急」→ 走条件边】");
+            System.out.println(releaseNoteWriter.draft("紧急修复：支付回调偶发超时"));
+        } catch (RuntimeException e) {
+            failed(e);
+        }
+    }
+
+    /** ⑧ 结构化编排：规划 → 执行 → 校验 → 修复 → 汇总，阶段流转写死在代码里。 */
+    private void demo8StagedWorkflow() {
+        section("⑧ 结构化编排 —— 规划 / 执行 / 校验 / 汇总的阶段流水线");
+        try {
+            Agent analyst = agentRegistry.get("stagedAnalyst");
+            AgentResult result = analyst.call("分析一下本心把「协议」与「厂商」分开的收益");
+            System.out.println(result.text());
+            System.out.println();
+            System.out.println("计划步骤: " + result.attributes().get("benxin.staged.plan"));
+            System.out.println("验收结论: " + result.attributes().get("benxin.staged.verdict")
+                    + " / 最终阶段: " + result.attributes().get("benxin.staged.stage"));
             System.out.println("步数 " + result.steps() + " / 用时 " + result.durationMillis() + " ms");
         } catch (RuntimeException e) {
             failed(e);

@@ -57,12 +57,13 @@ class LlmAutoConfigurationTest {
     }
 
     @Test
-    @DisplayName("六个内置 Loop 全部注册，默认是 dsh-minimal")
+    @DisplayName("八个内置 Loop 全部注册，默认是 dsh-minimal")
     void registersBuiltinLoops() {
         runner.run(context -> {
             LoopRegistry loops = context.getBean(LoopRegistry.class);
             assertThat(loops.names()).containsExactlyInAnyOrder(
-                    "dsh-minimal", "react", "claude-code", "codex", "plan-execute", "reflexion");
+                    "dsh-minimal", "react", "claude-code", "codex", "plan-execute", "reflexion",
+                    "workflow", "staged");
             assertThat(loops.defaultName()).isEqualTo("dsh-minimal");
         });
     }
@@ -190,6 +191,96 @@ class LlmAutoConfigurationTest {
             assertThat(context.getBean(ModelRegistry.class).isEmpty()).isTrue();
             assertThat(context.getBean(MemoryStore.class)).isInstanceOf(InMemoryMemoryStore.class);
         });
+    }
+
+    // ------------------------------------------------------------------
+    // 声明式工作流
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("llm.workflows.<key>.location 会把定义文件注册成 workflow:<key>")
+    void registersWorkflowFromClasspath() {
+        runner.withPropertyValues("llm.workflows.code-review.location=classpath:workflows/code-review.yml")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LoopRegistry loops = context.getBean(LoopRegistry.class);
+                    assertThat(loops.contains("workflow:code-review")).isTrue();
+
+                    com.benxin.llm.core.loop.AgentLoop loop = loops.get("workflow:code-review");
+                    assertThat(loop).isInstanceOf(com.benxin.llm.core.loop.WorkflowLoop.class);
+                    // Loop 名与注册名必须一致，否则 /llm/agents 会显示一个查不到的名字
+                    assertThat(loop.name()).isEqualTo("workflow:code-review");
+                    assertThat(loop.description()).contains("代码评审");
+                });
+    }
+
+    @Test
+    @DisplayName("llm.workflows.<key>.inline 支持直接内联 YAML")
+    void registersInlineWorkflow() {
+        runner.withPropertyValues("llm.workflows.quick.inline=" + String.join("\n",
+                        "name: quick",
+                        "nodes:",
+                        "  - id: a",
+                        "    prompt: \"做 ${input}\"",
+                        "  - id: b",
+                        "    type: end",
+                        "    output: \"${a}\"",
+                        "edges:",
+                        "  - from: a",
+                        "    to: b"))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(LoopRegistry.class).contains("workflow:quick")).isTrue();
+                });
+    }
+
+    @Test
+    @DisplayName("工作流可以成为全局默认 Loop")
+    void workflowCanBeDefaultLoop() {
+        runner.withPropertyValues(
+                        "llm.workflows.code-review.location=classpath:workflows/code-review.yml",
+                        "llm.agent.default-loop=workflow:code-review")
+                .run(context -> assertThat(context.getBean(LoopRegistry.class).defaultName())
+                        .isEqualTo("workflow:code-review"));
+    }
+
+    @Test
+    @DisplayName("两个都不配时报错可直接照做")
+    void workflowWithoutSourceFailsFast() {
+        runner.withPropertyValues("llm.workflows.broken.location=")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("llm.workflows.broken 需要配置 location 或 inline 之一");
+                });
+    }
+
+    @Test
+    @DisplayName("定义文件写错时启动期就失败，附带可定位的原因")
+    void invalidWorkflowFailsFast() {
+        runner.withPropertyValues("llm.workflows.bad.inline=" + String.join("\n",
+                        "name: bad",
+                        "nodes:",
+                        "  - id: a",
+                        "    type: agent"))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("llm.workflows.bad")
+                            .hasStackTraceContaining("必须提供 prompt");
+                });
+    }
+
+    @Test
+    @DisplayName("指向不存在的资源时明确说清是哪个配置项")
+    void missingWorkflowResourceFailsFast() {
+        runner.withPropertyValues("llm.workflows.ghost.location=classpath:workflows/does-not-exist.yml")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("llm.workflows.ghost")
+                            .hasStackTraceContaining("不存在");
+                });
     }
 
     /** 自定义 Loop：验证 {@code @LlmLoop} 注解上的名字而非类名被采用。 */

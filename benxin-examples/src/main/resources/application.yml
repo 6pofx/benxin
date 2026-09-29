@@ -28,6 +28,12 @@ llm:
     exec-timeout: 60s
     max-output-chars: 30000
 
+  # 声明式工作流：每个条目都会被注册成一个名为 workflow:<key> 的 Loop，
+  # 于是 @LlmAgent(loop = "workflow:release-notes") 直接可用 —— 加一张图不必写任何 Java。
+  workflows:
+    release-notes:
+      location: classpath:workflows/release-notes.yml
+
   # HTTP 接口默认关闭；打开后会暴露 /llm/agents/** 等端点（无鉴权，请自行加保护）
   web:
     enabled: true

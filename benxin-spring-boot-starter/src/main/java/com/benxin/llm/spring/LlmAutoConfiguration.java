@@ -13,6 +13,9 @@ import com.benxin.llm.core.hook.AgentListener;
 import com.benxin.llm.core.hook.LoggingListener;
 import com.benxin.llm.core.loop.BuiltinLoops;
 import com.benxin.llm.core.loop.LoopRegistry;
+import com.benxin.llm.core.loop.WorkflowLoop;
+import com.benxin.llm.core.workflow.WorkflowDefinition;
+import com.benxin.llm.core.workflow.WorkflowIo;
 import com.benxin.llm.core.memory.InMemoryMemoryStore;
 import com.benxin.llm.core.memory.MemoryStore;
 import com.benxin.llm.core.model.LlmModel;
@@ -36,7 +39,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -143,9 +150,11 @@ public class LlmAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public LoopRegistry llmLoopRegistry(LlmProperties properties, ObjectProvider<AgentLoop> loopBeans) {
+    public LoopRegistry llmLoopRegistry(LlmProperties properties, ObjectProvider<AgentLoop> loopBeans,
+                                        ResourceLoader resourceLoader) {
         LoopRegistry registry = new LoopRegistry();
         BuiltinLoops.registerAll(registry);
+        registerDeclaredWorkflows(registry, properties, resourceLoader);
 
         String annotatedDefault = null;
         for (AgentLoop loop : loopBeans.orderedStream().toList()) {
@@ -169,6 +178,55 @@ public class LlmAutoConfiguration {
         }
         log.info("[benxin] 可用 Loop {}（默认 {}）", registry.names(), registry.defaultName());
         return registry;
+    }
+
+    /**
+     * 把 {@code llm.workflows.*} 里声明的定义各注册成一个 {@code workflow:<key>} Loop。
+     *
+     * <p>这样"加一个工作流"就只是加一个 YAML 文件加一行配置，不需要碰任何 Java 代码 ——
+     * 这正是声明式工作流模式想要兑现的东西。定义有问题时<b>直接让启动失败</b>：
+     * 一份跑起来才发现画错的图，比一个启动期的报错昂贵得多。</p>
+     */
+    private void registerDeclaredWorkflows(LoopRegistry registry, LlmProperties properties,
+                                           ResourceLoader resourceLoader) {
+        for (Map.Entry<String, LlmProperties.WorkflowProperties> entry
+                : properties.getWorkflows().entrySet()) {
+            String key = entry.getKey();
+            String loopName = WorkflowLoop.NAME + ":" + key;
+            WorkflowDefinition definition = loadWorkflow(key, entry.getValue(), resourceLoader);
+            registry.register(loopName, WorkflowLoop.named(loopName, definition));
+            log.info("[benxin] 注册工作流 Loop [{}] ← {}（{} 个节点）",
+                    loopName, definition.name(), definition.nodes().size());
+        }
+    }
+
+    private WorkflowDefinition loadWorkflow(String key, LlmProperties.WorkflowProperties config,
+                                            ResourceLoader resourceLoader) {
+        String where = "llm.workflows." + key;
+        boolean hasInline = config.getInline() != null && !config.getInline().isBlank();
+        boolean hasLocation = config.getLocation() != null && !config.getLocation().isBlank();
+        if (hasInline && hasLocation) {
+            throw new IllegalStateException(where + " 同时配置了 location 与 inline，请二选一");
+        }
+        if (!hasInline && !hasLocation) {
+            throw new IllegalStateException(where + " 需要配置 location 或 inline 之一");
+        }
+        try {
+            if (hasInline) {
+                return WorkflowIo.read(config.getInline());
+            }
+            Resource resource = resourceLoader.getResource(config.getLocation());
+            if (!resource.exists()) {
+                throw new IllegalStateException(where + " 指向的资源不存在：" + config.getLocation());
+            }
+            try (InputStream in = resource.getInputStream()) {
+                return WorkflowIo.read(in);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException(where + " 读取失败：" + e.getMessage(), e);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(where + " 的定义非法：" + e.getMessage(), e);
+        }
     }
 
     // ------------------------------------------------------------------
