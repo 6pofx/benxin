@@ -8,7 +8,7 @@ import com.benxin.llm.core.model.ModelConfig;
 import java.util.Map;
 
 /**
- * 协议编解码器 —— 本心"一切可替换"的关键切面之一。
+ * 协议编解码器 —— 本心"一切可插拔"的关键切面之一。
  *
  * <p>想让本心支持一个新协议（例如 AWS Bedrock、Cohere、Ollama 原生 API），
  * 只需实现本接口并注册为 bean，无需改动任何调用方代码。</p>

@@ -15,7 +15,7 @@ import java.util.Map;
  * <ol>
  *   <li><b>可分段替换</b>：claude-code 与 codex 的系统提示词被拆成若干语义段落，每段一个
  *       {@code public static final String} 常量。用户想改"工具使用规范"不必去改整个
- *       Loop 的代码，复制本类替换其中一段常量即可（这正是本心"一切可替换"的落地方式）。</li>
+ *       Loop 的代码，复制本类替换其中一段常量即可（这正是本心"一切可插拔"的落地方式）。</li>
  *   <li><b>如实反映运行时能力</b>：{@link #claudeCode(PromptContext)} 与
  *       {@link #codex(PromptContext)} 渲染出来的文本，只会提到 {@link PromptContext#toolNames()}
  *       里真实存在的工具。原因很直接：提示词里写了一个并不存在的工具（例如工具集里没有

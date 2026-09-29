@@ -50,7 +50,7 @@ public class OpenAiModel extends HttpLlmModel {
      * 主构造器：显式指定能力声明。
      *
      * @param config       模型端点配置
-     * @param transport    HTTP 传输实现（可替换为 OkHttp / WebClient / 测试假实现）
+     * @param transport    HTTP 传输实现（可换成 OkHttp / WebClient / 测试假实现）
      * @param capabilities 能力声明；传 null 时由 {@link HttpLlmModel} 兜底为默认值
      */
     public OpenAiModel(ModelConfig config, HttpTransport transport, ModelCapabilities capabilities) {

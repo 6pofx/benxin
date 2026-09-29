@@ -411,7 +411,7 @@ public final class OpenAiCodec implements ProtocolCodec {
      * 透传厂商私有参数（{@code reasoning_effort}、{@code max_completion_tokens}、
      * {@code parallel_tool_calls}、{@code thinking} 等）。
      *
-     * <p>写在最后且为覆盖式：用户 extra 里的同名键优先级最高，这是"一切可替换"
+     * <p>写在最后且为覆盖式：用户 extra 里的同名键优先级最高，这是"一切可插拔"
      * 在协议层的最小让步——新特性不需要改本类。</p>
      */
     private void writeExtra(ObjectNode root, ChatRequest request) {

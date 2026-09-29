@@ -42,7 +42,7 @@ import java.util.Set;
  *   <li><b>熔断而非重试</b>：连续 {@code maxConsecutiveToolErrors} 次工具失败时注入一条提醒让模型
  *       停下来重新评估，而不是替它换参数重试——Loop 不知道失败原因，模型才知道。</li>
  *   <li><b>只依赖工具名，不依赖工具类</b>：待办、子代理、命令类工具全部按名字（字符串）判断，
- *       因此 claude-code 可以和任意工具集组合，这正是"一切可替换"的体现。</li>
+ *       因此 claude-code 可以和任意工具集组合，这正是"一切可插拔"的体现。</li>
  *   <li><b>裸环境可用</b>：没有工具、没有子代理时，本 Loop 依然正常工作（只是不会注入待办提醒、
  *       也不会暴露子代理能力）。</li>
  * </ol>
@@ -325,7 +325,7 @@ public class ClaudeCodeLoop extends AbstractAgentLoop {
     /**
      * 容错解析待办清单。
      *
-     * <p>待办工具是"可替换"的一环：不同实现可能写 {@code List<Map<String,Object>>}、
+     * <p>待办工具是"可插拔"的一环：不同实现可能写 {@code List<Map<String,Object>>}、
      * {@code List<String>}、甚至一段多行文本。本 Loop 不绑定任何具体实现，因此对常见形态逐一兜住；
      * 认不出来的形态一律忽略（绝不抛异常，也绝不因为读不懂待办就中断主循环）。</p>
      */

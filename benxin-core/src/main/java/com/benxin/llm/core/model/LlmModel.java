@@ -4,7 +4,7 @@ import com.benxin.llm.core.chat.ChatRequest;
 import com.benxin.llm.core.chat.ChatResponse;
 
 /**
- * 模型抽象 —— 一切可替换的第一现场。
+ * 模型抽象 —— 一切可插拔的第一现场。
  *
  * <p>想接入未被内置支持的厂商，实现本接口并交给容器即可；
  * 想让模型带上缓存、限流、路由、降级、录制回放，也只需再包一层装饰器。

@@ -428,7 +428,7 @@ class AgentRuntimeTest {
     }
 
     @Test
-    @DisplayName("toBuilder 派生的 Agent 与原实例互不影响 —— 一切可替换的最小验证")
+    @DisplayName("toBuilder 派生的 Agent 与原实例互不影响 —— 一切可插拔的最小验证")
     void derivedAgentIsIndependent() {
         ScriptedModel model = ScriptedModel.of(ScriptedModel.text("ok"));
         Agent base = agent(model, b -> b.memory(true).maxSteps(4));

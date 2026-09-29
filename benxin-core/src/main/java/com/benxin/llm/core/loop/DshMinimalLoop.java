@@ -3,7 +3,7 @@ package com.benxin.llm.core.loop;
 import com.benxin.llm.core.annotation.LlmLoop;
 
 /**
- * DSH 极简循环 —— 「一切皆可替换」的最小可读样板。
+ * DSH 极简循环 —— 「一切皆可插拔」的最小可读样板。
  *
  * <p><b>设计来源</b>：DSH（DeepSeek Harness）式的一问一答主循环。它只保留 Agent 之所以是
  * Agent 的最小内核：把历史交给模型 → 模型要么给出答案、要么请求工具 → 执行工具并把结果放回

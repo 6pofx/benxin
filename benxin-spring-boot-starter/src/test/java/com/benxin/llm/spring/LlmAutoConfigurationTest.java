@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 自动配置的条件装配与"用户 bean 优先"语义。
  *
- * <p>这组测试是"一切皆可替换"这个主张的直接证据：只要定义一个同类型 bean，
+ * <p>这组测试是"一切皆可插拔"这个主张的直接证据：只要定义一个同类型 bean，
  * 就会接管对应组件，不需要开关、不需要排除自动配置。</p>
  */
 class LlmAutoConfigurationTest {

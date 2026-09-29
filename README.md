@@ -1,8 +1,8 @@
 # 本心 · benxin
 
-> 一个 Spring Boot 插件：**声明式**地调用 LLM，并且**一切皆可替换**。
+> 一个 Spring Boot 插件：**声明式**地调用 LLM，并且**一切皆可插拔**。
 
-`本心` 取自"万变不离其宗"——模型、协议、循环、工具、上下文、记忆、提示词全都可以被换掉，
+模型、协议、循环、工具、上下文、记忆、提示词全都可以被换掉，
 而调用方的写法不变。你写一个接口、打一个注解，剩下的交给容器。
 
 ```java
@@ -18,7 +18,7 @@ public interface WeatherAssistant {
 
 ## 目录
 
-- [核心主张：一切皆可替换](#核心主张一切皆可替换)
+- [核心主张：一切皆可插拔](#核心主张一切皆可插拔)
 - [快速开始](#快速开始)
 - [注解速查](#注解速查)
 - [三种主流 LLM API 协议](#三种主流-llm-api-协议)
@@ -32,7 +32,7 @@ public interface WeatherAssistant {
 
 ---
 
-## 核心主张：一切皆可替换
+## 核心主张：一切皆可插拔
 
 框架里没有一个"必须用我的实现"的地方。每个环节都是 `接口 + 内置实现 + 覆盖点`：
 
@@ -261,7 +261,7 @@ public class MyBedrockCodec implements ProtocolCodec {
 
 | 名字 | 设计来源 | 特征 |
 |---|---|---|
-| `dsh-minimal` | DSH 极简 | `调模型 → 有工具就执行 → 再调模型`，约 80 行。零内置工具、零压缩，**故意什么都不多做**，是"一切可替换"的最小样板 |
+| `dsh-minimal` | DSH 极简 | `调模型 → 有工具就执行 → 再调模型`，约 80 行。零内置工具、零压缩，**故意什么都不多做**，是"一切可插拔"的最小样板 |
 | `react` | 经典 ReAct | Thought → Action → Observation；**模型不支持 function calling 时自动降级到文本协议**（解析 `Action:` / `Action Input:` / `Final Answer:`） |
 | `claude-code` | Claude Code | 单一主循环 + **子代理派生**（独立上下文、只回传结论）+ 待办管理 + **自动上下文压缩** + 连续工具错误熔断 |
 | `codex` | OpenAI Codex | **turn 制**：`update_plan` 出计划 → `apply_patch` 做最小改动 → 命令验证；**如实告知沙箱权限边界**；未验证则给一次补验证的机会 |
@@ -631,7 +631,7 @@ mvn -o spring-boot:run -Dspring-boot.run.profiles=real
 
 **为什么 `dsh-minimal` 只有几十行？**
 它是这个框架的自证：如果连最核心的 Agent Loop 都能短到一眼看完，
-那"一切皆可替换"就不是口号——你完全可以自己写一个，而且不会比它复杂多少。
+那"一切皆可插拔"就不是口号——你完全可以自己写一个，而且不会比它复杂多少。
 
 **为什么流式工具调用要在解码器里拼装？**
 OpenAI 的 `tool_calls[].function.arguments` 是**按 index 分片到达**的，

@@ -1,7 +1,7 @@
 package com.benxin.llm.core.loop;
 
 /**
- * Agent 循环 —— 本心最核心的可替换点。
+ * Agent 循环 —— 本心最核心的可插拔点。
  *
  * <p>"Loop"决定 Agent 如何思考：ReAct 的一步一观察、Claude Code 的主循环加子代理、
  * Codex 的 turn 制计划与补丁、DSH 极简的一问一答。想自定义一种工作方式，

@@ -8,7 +8,7 @@ import com.benxin.llm.core.tool.ToolInvocation;
 import com.benxin.llm.core.tool.ToolResult;
 
 /**
- * 拦截器：在 Agent 运行、模型调用、工具执行三个层级上埋的可替换钩子。
+ * 拦截器：在 Agent 运行、模型调用、工具执行三个层级上埋的可插拔钩子。
  *
  * <p>日志、脱敏、限流、计费、注入额外系统提示、缓存模型响应、给工具打补丁，
  * 全部可以在这里完成，而不必修改 Loop。用 {@code @LlmGuard} 注解或直接注册 bean 即可生效。</p>

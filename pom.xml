@@ -17,7 +17,7 @@
     <packaging>pom</packaging>
 
     <name>benxin</name>
-    <description>本心 —— 声明式 LLM Agent 调用插件：一切皆可替换（模型 / 协议 / Loop / 工具 / 上下文 / 记忆 / 提示词 / 拦截器）</description>
+    <description>本心 —— 声明式 LLM Agent 调用插件：一切皆可插拔（模型 / 协议 / Loop / 工具 / 上下文 / 记忆 / 提示词 / 拦截器）</description>
 
     <licenses>
         <license>

@@ -11,7 +11,7 @@ import com.benxin.llm.core.message.ChatMessage;
  * 自定义 Loop 示例：先让模型复述任务，确认理解无误后再进入标准的工具循环。
  *
  * <p>整个类不到 70 行，且<b>没有一行涉及模型调用、工具执行、沙箱校验、流式聚合</b> ——
- * 那些都由 {@link LoopContext} 承担。这就是本心"一切皆可替换"在代码层面的直观体现：
+ * 那些都由 {@link LoopContext} 承担。这就是本心"一切皆可插拔"在代码层面的直观体现：
  * 想换一种思考方式，只需要写清"思考的步骤"，不必重新实现一遍基础设施。</p>
  *
  * <p>打上 {@link LlmLoop} 注解后，这个 Loop 会被 starter 自动注册，

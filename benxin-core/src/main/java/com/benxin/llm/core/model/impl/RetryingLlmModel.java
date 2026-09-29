@@ -15,7 +15,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 可重试装饰器 —— "一切可替换"最直观的示范。
+ * 可重试装饰器 —— "一切可插拔"最直观的示范。
  *
  * <p>它自己不含任何协议知识：只把调用转发给被包装的 {@link LlmModel}，失败时按指数退避再试。
  * 因此它可以包住任何实现（内置三种协议、用户自定义模型、甚至另一层装饰器），

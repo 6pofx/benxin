@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.Map;
 
 /**
- * HTTP 传输层 —— "一切可替换"的另一个切面。
+ * HTTP 传输层 —— "一切可插拔"的另一个切面。
  *
  * <p>默认实现基于 JDK 自带的 {@code java.net.http.HttpClient}，零第三方依赖。
  * 想换成 OkHttp / WebClient / 带代理与 mTLS 的自建客户端，实现本接口即可；

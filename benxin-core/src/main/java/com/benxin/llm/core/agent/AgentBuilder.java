@@ -31,7 +31,7 @@ import java.util.concurrent.ExecutorService;
 
 /**
  * Agent 装配器。每一项协作组件都可以替换，未显式提供的使用默认实现，
- * 这正是"一切皆可替换"在 API 层面的直观体现。
+ * 这正是"一切皆可插拔"在 API 层面的直观体现。
  */
 public class AgentBuilder {
 

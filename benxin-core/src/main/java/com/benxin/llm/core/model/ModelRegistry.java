@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 模型注册表：按名字管理所有可用模型，并持有"默认模型"。
  *
  * <p>{@code @LlmAgent(model = "xxx")} 里的名字就是在这里查的。
- * 该类型本身也是可替换的 bean。</p>
+ * 该类型本身也是可插拔的 bean。</p>
  */
 public class ModelRegistry {
 

@@ -15,7 +15,7 @@ import java.util.List;
  */
 public final class BuiltinLoops {
 
-    /** 默认 Loop 名。选它是因为它最简、最可预测，也最能体现"一切可替换"。 */
+    /** 默认 Loop 名。选它是因为它最简、最可预测，也最能体现"一切可插拔"。 */
     public static final String DEFAULT_LOOP = "dsh-minimal";
 
     /** 内置 Loop 名，按推荐了解顺序排列。 */
