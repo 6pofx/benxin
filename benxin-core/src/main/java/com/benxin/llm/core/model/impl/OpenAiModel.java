@@ -6,6 +6,7 @@ import com.benxin.llm.core.model.ModelException;
 import com.benxin.llm.core.protocol.Codecs;
 import com.benxin.llm.core.protocol.Protocol;
 import com.benxin.llm.core.protocol.ProtocolCodec;
+import com.benxin.llm.core.protocol.openai.OpenAiCodec;
 import com.benxin.llm.core.transport.HttpLlmModel;
 import com.benxin.llm.core.transport.HttpTransport;
 import com.benxin.llm.core.transport.JdkHttpTransport;
@@ -23,28 +24,13 @@ import com.benxin.llm.core.transport.JdkHttpTransport;
 public class OpenAiModel extends HttpLlmModel {
 
     /**
-     * 推荐能力声明，依据如下：
-     * <ul>
-     *   <li>{@code streaming=true}：{@code stream=true} 的 SSE 增量返回是协议标准能力。</li>
-     *   <li>{@code toolCalling=true}：{@code tools} / {@code tool_calls} 是协议标准字段。</li>
-     *   <li>{@code parallelToolCalls=true}：单条 assistant 消息可携带多个 {@code tool_calls}，
-     *       且可通过 {@code parallel_tool_calls=false} 关闭，故按"支持"声明。</li>
-     *   <li>{@code vision=true}：{@code image_url} 内容块为多模态标准形态。</li>
-     *   <li>{@code thinking=false}：官方 Chat Completions 并未标准化"思维链"字段；
-     *       兼容厂商各写各的（DeepSeek 的 {@code reasoning_content}、Qwen 的 {@code enable_thinking} 等），
-     *       能力声明宁可保守，需要的用户用三参构造器显式打开，避免 Loop 误判而发出无效请求。</li>
-     *   <li>{@code maxContextTokens=128_000}：gpt-4o/4.1 与主流兼容端点的通行上下文长度。</li>
-     * </ul>
-     * 注意：以上是"协议预设"而非"某厂商模型的真实上限"，逐模型差异请用三参构造器覆盖。
+     * 推荐能力声明。
+     *
+     * <p>真正的定义在 {@link OpenAiCodec#RECOMMENDED_CAPABILITIES} ——
+     * "这套协议支持什么"属于协议级知识，归 Codec 所有；
+     * 这里保留同名常量只是为了兼容既有调用方。</p>
      */
-    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = ModelCapabilities.builder()
-            .streaming(true)
-            .toolCalling(true)
-            .parallelToolCalls(true)
-            .vision(true)
-            .thinking(false)
-            .maxContextTokens(128_000)
-            .build();
+    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = OpenAiCodec.RECOMMENDED_CAPABILITIES;
 
     /**
      * 主构造器：显式指定能力声明。

@@ -22,6 +22,9 @@ import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.model.ModelConfig;
 import com.benxin.llm.core.model.ModelFactory;
 import com.benxin.llm.core.model.ModelRegistry;
+import com.benxin.llm.core.protocol.Protocol;
+import com.benxin.llm.core.protocol.ProtocolCodec;
+import com.benxin.llm.core.protocol.ProtocolRegistry;
 import com.benxin.llm.core.prompt.SystemPromptProvider;
 import com.benxin.llm.core.prompt.TemplateSystemPromptProvider;
 import com.benxin.llm.core.sandbox.ApprovalHandler;
@@ -96,12 +99,40 @@ public class LlmAutoConfiguration {
     }
 
     // ------------------------------------------------------------------
+    // 协议注册表
+    // ------------------------------------------------------------------
+
+    /**
+     * 协议注册表：内置四协议 + 容器里所有的 {@link ProtocolCodec} bean。
+     *
+     * <p>这是"加第四种协议"能兑现的关键一环 —— 在此之前，用户按文档注册的
+     * {@code ProtocolCodec} bean <b>是个完全惰性的 bean</b>，starter 里没有任何一处消费它。
+     * 现在它会被收进来，于是配置里写 {@code protocol: bedrock} 就能生效。</p>
+     *
+     * <p>用户 bean 在内置之后登记，因此<b>同名即覆盖</b>：想用自己的实现顶掉内置
+     * {@code openai}，注册一个 {@code protocol()} 返回 {@link Protocol#OPENAI} 的 Codec 即可。</p>
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public ProtocolRegistry llmProtocolRegistry(ObjectProvider<ProtocolCodec> codecBeans) {
+        ProtocolRegistry registry = ProtocolRegistry.withBuiltins();
+        codecBeans.orderedStream().forEach(codec -> {
+            registry.register(codec);
+            log.info("[benxin] 注册自定义协议 [{}] ← {}", codec.protocol().id(),
+                    AopUtils.getTargetClass(codec).getName());
+        });
+        log.info("[benxin] 可用协议 {}（内置 {}）", registry.describe(), Protocol.builtinIds());
+        return registry;
+    }
+
+    // ------------------------------------------------------------------
     // 模型
     // ------------------------------------------------------------------
 
     @Bean
     @ConditionalOnMissingBean
     public ModelRegistry llmModelRegistry(LlmProperties properties, HttpTransport transport,
+                                          ProtocolRegistry protocolRegistry,
                                           ObjectProvider<LlmModel> modelBeans) {
         Map<String, ModelConfig> configs = new LinkedHashMap<>();
         properties.getModels().forEach((name, model) -> configs.put(name, model.toModelConfig(name)));
@@ -118,7 +149,7 @@ public class LlmAutoConfiguration {
                         .orElse(null)
                 : (properties.getModels().containsKey(configured) ? configured : null);
 
-        ModelRegistry registry = ModelFactory.registry(configs, transport, fromProperties);
+        ModelRegistry registry = ModelFactory.registry(configs, transport, fromProperties, protocolRegistry);
 
         // 容器里的 LlmModel bean 优先，可覆盖同名配置项 —— 这是"配置不够用时用代码接管"的通道
         List<String> beanModels = new ArrayList<>();

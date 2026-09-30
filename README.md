@@ -21,7 +21,7 @@ public interface WeatherAssistant {
 - [核心主张：一切皆可插拔](#核心主张一切皆可插拔)
 - [快速开始](#快速开始)
 - [注解速查](#注解速查)
-- [三种主流 LLM API 协议](#三种主流-llm-api-协议)
+- [四种主流 LLM API 协议](#四种主流-llm-api-协议)
 - [内置 Agent Loop](#内置-agent-loop)
 - [工作流模式](#工作流模式)
 - [工具](#工具)
@@ -39,8 +39,8 @@ public interface WeatherAssistant {
 
 | 切面 | 接口 | 内置实现 | 怎么换掉 |
 |---|---|---|---|
-| 模型 | `LlmModel` | `OpenAiModel` / `AnthropicModel` / `GeminiModel` | 定义 `LlmModel` bean，或写 `llm.models.*` |
-| 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` | ⚠️ **暂不支持**：`Protocol` 是封闭枚举、starter 也不消费 `ProtocolCodec` bean。见[想加第四种协议？](#想加第四种协议) |
+| 模型 | `LlmModel` | `HttpLlmModel`（由协议 Codec 装配；`OpenAiModel` / `AnthropicModel` / `GeminiModel` 保留为便捷预设类） | 定义 `LlmModel` bean，或写 `llm.models.*` |
+| 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` / `ResponsesApiCodec` | 注册 `ProtocolCodec` bean，配置里写 `protocol: <你的名字>`。见[加自己的协议](#加自己的协议) |
 | 传输 | `HttpTransport` | `JdkHttpTransport`（零依赖） | 定义 `HttpTransport` bean（OkHttp / WebClient / 测试桩） |
 | **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged` | `@LlmLoop("名字")` |
 | **工具** | `ToolCallback` | 反射适配器 + 8 个内置工具 | `@LlmTool` 注解方法 |
@@ -218,7 +218,7 @@ public interface CodeReviewer {
 
 ---
 
-## 三种主流 LLM API 协议
+## 四种主流 LLM API 协议
 
 "协议"与"厂商"是**正交**的。同一套 OpenAI Chat Completions 协议被大量服务兼容，
 所以换厂商往往只需要改两个字段。
@@ -300,41 +300,95 @@ llm:
 * **`usageMetadata` 是累计口径。** 官方逐帧发送"截至当前的累计值"，本心的流式解码器会把它
   换算成增量再向上层回调，所以多帧之间的用量是**相加**得到的真实值，而不是被重复计入。
 
-### 想加第四种协议？
+### 四、OpenAI Responses API
+
+`POST {base-url}/v1/responses`
+
+```yaml
+llm:
+  models:
+    gpt-responses:
+      protocol: responses
+      base-url: https://api.openai.com
+      api-key: ${OPENAI_KEY}
+      model: gpt-4o
+    deepseek-responses:                  # DeepSeek 也提供兼容端点
+      protocol: responses
+      base-url: https://api.deepseek.com/responses
+      model: deepseek-flash
+```
+
+**它与 Chat Completions 是两套不同的报文结构**，不是同一个 API 的开关，所以在本心里是并列的两个协议：
+
+| | Chat Completions | Responses API |
+|---|---|---|
+| 系统提示 | messages 里的 `system` 角色 | **顶层 `instructions`** |
+| 对话载体 | `messages[]` | **`input[]` item 列表** |
+| 工具声明 | `tools[].function.{name,parameters}` | **`tools[].{name,parameters}`（扁平）** |
+| 工具调用 | assistant 消息里的 `tool_calls[]` | **独立的 `function_call` item** |
+| 工具结果 | `role: "tool"` 消息 | **独立的 `function_call_output` item** |
+| 输出上限 | `max_tokens` | **`max_output_tokens`** |
+| 结束原因 | `finish_reason` | **`status`** |
+| 流式 | 匿名 SSE + `[DONE]` | **命名事件，且没有 `[DONE]`** |
+
+处理了：顶层 `instructions`、`input` item 摊平与还原（`message` / `function_call` /
+`function_call_output`，含 `input_image` 多模态）、扁平 `tools[]`、`tool_choice` 四态、
+`status` → 统一结束原因、`usage.input_tokens_details.cached_tokens` 与
+`output_tokens_details.reasoning_tokens`，以及命名 SSE 事件流
+（`response.output_text.delta` / `response.reasoning_text.delta` /
+`response.function_call_arguments.delta` / `response.output_item.done` /
+`response.completed` · `incomplete` · `failed`）。
+
+三个容易踩错的口径：
+
+* **没有 `[DONE]`。** 流的结束靠 `response.completed` / `response.incomplete` /
+  `response.failed` 三个终态事件；网关提前断流时 `finish()` 会把已累积的工具调用交出去，
+  不会静默吞掉。
+* **工具参数按 `output_index` 分片。** 与 Chat Completions 的 `index` 语义相同，
+  但完整信息在 `response.output_item.done` 里，本心以它为准。
+* **`incomplete` 归为"被长度截断"。** 目前唯一的 incomplete 原因就是触达
+  `max_output_tokens`，上层据此判断输出只是半成品。
+* **思考内容仅解析、不回传。** 与 Gemini 侧同一个取舍：`reasoning` item 需要配套的
+  加密内容结构，而 `ThinkingPart` 只保存纯文本，硬塞回去多数端点会 400。
+
+### 加自己的协议
 
 ```java
 @Component
 public class MyBedrockCodec implements ProtocolCodec {
-    @Override public Protocol protocol() { return Protocol.OPENAI; }   // 见下方说明
+    @Override public Protocol protocol() { return Protocol.of("bedrock"); }   // 任意名字都行
     // endpoint / headers / encode / decode / newStreamDecoder
+    // 可选：capabilities() 声明该协议支持流式/工具调用/上下文窗口
 }
 ```
 
-⚠️ **当前的能力边界（与"一切皆可插拔"的总基调相比，这是唯一的例外）：**
+注册成 bean 即可，然后在配置里写 `protocol: bedrock` —— **调用方代码一行都不用改**：
 
-* `Protocol` 是**封闭枚举**（只有 `openai` / `anthropic` / `gemini`），
-  `Protocol.from("bedrock")` 会直接抛 `IllegalArgumentException`，
-  配置里写 `protocol: bedrock` 会让应用启动失败并列出可选值；
-* starter **不会消费** `ProtocolCodec` bean：内置装配走的是 `ModelFactory` 的协议分支，
-  不查任何编解码器注册表。
-
-也就是说，**"注册一个 `ProtocolCodec` bean 就能在 yml 里写 `protocol: bedrock`"目前做不到**。
-可行且受支持的写法是**程序化装配**（调用方代码一行都不用改）：
-
-```java
-@Bean
-LlmModel bedrockModel(HttpTransport transport) {
-    ModelConfig config = ModelConfig.builder("bedrock")
-            .protocol("openai")          // 占位：protocol 字段过不了 Protocol.from 的自定义名校验
-            .baseUrl("https://bedrock.internal")
-            .model("anthropic.claude-v2")
-            .build();
-    return Benxin.withCodec(config, new MyBedrockCodec(), transport);   // 真正生效的是这一行
-}
+```yaml
+llm:
+  models:
+    bedrock:
+      protocol: bedrock
+      base-url: https://bedrock.internal
+      model: anthropic.claude-v2
 ```
 
-代价是要自己装配整个模型、绕过了 `protocol` 配置项 —— 与"协议与厂商正交"的初衷有出入，
-因此这条边界写在最显眼的地方，而不是留给使用者去踩。
+这条链路之所以成立，是因为三处都做了改动：`Protocol` 是可扩展的标识类型（不再是封闭枚举）、
+starter 会把容器里所有 `ProtocolCodec` bean 收进 `ProtocolRegistry`、`ModelFactory`
+按注册表解析协议而不是走写死的分支。
+
+几个有用的细节：
+
+* **同名即覆盖。** 用户 bean 在内置之后登记，所以 `protocol()` 返回 `Protocol.OPENAI`
+  就能用自己的实现顶掉内置的 `openai`。
+* **能力声明归 Codec。** `capabilities()` 有默认值，自定义协议可以不写；但如果你的协议
+  不支持流式或工具调用，**务必覆写它** —— Loop 会据此改变交互方式。
+* **未注册的协议仍然快速失败。** 配置里写了一个没有 Codec 的协议名，应用会在启动期
+  报错并列出所有已注册协议，不会拖到第一次请求才炸：
+  `模型 [x] 使用了未知协议 [bedrock]，已注册的协议: [openai, anthropic, gemini, responses]。…`
+* **不用 Spring 也能注册。** 裸 core 场景用
+  `ModelFactory.create(config, transport, ProtocolRegistry.withBuiltins().register(codec))`，
+  或直接 `Benxin.withCodec(config, codec, transport)`。
 
 ---
 
@@ -972,7 +1026,7 @@ cd benxin
 mvn -o test
 ```
 
-**212 个测试全部通过**（benxin-core 163 / starter 35 / examples 14，共 17 个测试类），
+**244 个测试全部通过**（benxin-core 191 / starter 39 / examples 14，共 19 个测试类），
 全部离线、不消耗 token：
 
 | 测试类 | 数量 | 覆盖 |
@@ -980,6 +1034,8 @@ mvn -o test
 | `OpenAiCodecTest` | 7 | 端点拼接、消息与工具编码、多模态、`tool_calls` 解码、**流式 arguments 分片拼装** |
 | `AnthropicCodecTest` | 11 | 顶层 system、`max_tokens` 兜底、`input_schema`、**连续工具结果合并进同一 user 回合**、thinking block、`input_json_delta` 拼装 |
 | `GeminiCodecTest` | 9 | `:generateContent` / `:streamGenerateContent`、systemInstruction、**schema 清洗**、`functionResponse` 按名对位、安全拦截映射 |
+| `ResponsesApiCodecTest` | 18 | 顶层 `instructions`、`input` item 摊平（message / function_call / function_call_output / input_image）、**扁平 `tools[]`**、`max_output_tokens`、`status` → 结束原因、命名 SSE 事件与**无 `[DONE]`** 的收尾、工具参数按 `output_index` 分片 |
+| `ProtocolRegistryTest` | 10 | `Protocol` 可扩展标识类型与实例驻留、注册表解析、**自定义协议端到端装配**、同名覆盖内置、未注册协议的快速失败 |
 | `SseParserTest` | 6 | 三协议 SSE 差异、多行 data、`[DONE]`、注释行、CRLF、尾事件冲刷 |
 | `ToolScannerTest` | 6 | 注解扫描、方法名兜底、参数绑定与默认值、`ToolContext` 注入、异常转错误、DTO 序列化 |
 | `JsonSchemaGeneratorTest` | 6 | 类型映射、枚举、集合、嵌套 POJO、`Optional` 解包、required 规则 |

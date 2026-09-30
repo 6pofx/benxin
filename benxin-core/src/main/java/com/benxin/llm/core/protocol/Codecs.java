@@ -20,6 +20,7 @@ public final class Codecs {
         register(Protocol.OPENAI, "com.benxin.llm.core.protocol.openai.OpenAiCodec");
         register(Protocol.ANTHROPIC, "com.benxin.llm.core.protocol.anthropic.AnthropicCodec");
         register(Protocol.GEMINI, "com.benxin.llm.core.protocol.gemini.GeminiCodec");
+        register(Protocol.RESPONSES, "com.benxin.llm.core.protocol.responses.ResponsesApiCodec");
     }
 
     private Codecs() {

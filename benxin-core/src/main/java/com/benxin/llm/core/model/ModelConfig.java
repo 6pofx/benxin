@@ -169,8 +169,15 @@ public final class ModelConfig {
             return this;
         }
 
+        /**
+         * 按 id 指定协议。
+         *
+         * <p>{@link Protocol#of(String)} 接受<b>任意</b> id，因此这里不再对自定义协议名抛异常 ——
+         * 该协议能不能用由 {@code ProtocolRegistry} 里有没有对应的 {@code ProtocolCodec} 决定，
+         * 未注册时会在装配模型时给出可读报错并列出所有已注册协议。</p>
+         */
         public Builder protocol(String protocol) {
-            this.protocol = Protocol.from(protocol);
+            this.protocol = Protocol.of(protocol);
             return this;
         }
 

@@ -5,6 +5,7 @@ import com.benxin.llm.core.model.ModelConfig;
 import com.benxin.llm.core.model.ModelException;
 import com.benxin.llm.core.protocol.Codecs;
 import com.benxin.llm.core.protocol.Protocol;
+import com.benxin.llm.core.protocol.anthropic.AnthropicCodec;
 import com.benxin.llm.core.protocol.ProtocolCodec;
 import com.benxin.llm.core.transport.HttpLlmModel;
 import com.benxin.llm.core.transport.HttpTransport;
@@ -20,26 +21,13 @@ import com.benxin.llm.core.transport.JdkHttpTransport;
 public class AnthropicModel extends HttpLlmModel {
 
     /**
-     * 推荐能力声明，依据如下：
-     * <ul>
-     *   <li>{@code streaming=true}：SSE 事件流（{@code message_start} / {@code content_block_delta} ...）是 Messages API 的一等能力。</li>
-     *   <li>{@code toolCalling=true}：{@code tools} 与 {@code tool_use} / {@code tool_result} 内容块是标准字段。</li>
-     *   <li>{@code parallelToolCalls=true}：一条 assistant 消息可返回多个 {@code tool_use} 块（可用
-     *       {@code tool_choice.disable_parallel_tool_use} 关闭），故按"支持"声明。</li>
-     *   <li>{@code vision=true}：{@code image} 内容块（base64 / url 两种来源）为多模态标准形态。</li>
-     *   <li>{@code thinking=true}：扩展思考是官方能力——请求侧有 {@code thinking} 参数，
-     *       响应侧有 {@code thinking} 内容块与 {@code signature} 回传要求，本心统一映射为 {@code ThinkingPart}。</li>
-     *   <li>{@code maxContextTokens=200_000}：Claude 3 / 3.5 / 4 系列的通行上下文窗口。</li>
-     * </ul>
+     * 推荐能力声明。
+     *
+     * <p>真正的定义在 {@link AnthropicCodec#RECOMMENDED_CAPABILITIES} ——
+     * "这套协议支持什么"属于协议级知识，归 Codec 所有；
+     * 这里保留同名常量只是为了兼容既有调用方。</p>
      */
-    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = ModelCapabilities.builder()
-            .streaming(true)
-            .toolCalling(true)
-            .parallelToolCalls(true)
-            .vision(true)
-            .thinking(true)
-            .maxContextTokens(200_000)
-            .build();
+    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = AnthropicCodec.RECOMMENDED_CAPABILITIES;
 
     /**
      * 主构造器：显式指定能力声明。

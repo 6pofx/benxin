@@ -14,6 +14,7 @@ import com.benxin.llm.core.message.ThinkingPart;
 import com.benxin.llm.core.message.ToolResultPart;
 import com.benxin.llm.core.message.ToolUsePart;
 import com.benxin.llm.core.model.LlmStreamHandler;
+import com.benxin.llm.core.model.ModelCapabilities;
 import com.benxin.llm.core.model.ModelConfig;
 import com.benxin.llm.core.model.ModelException;
 import com.benxin.llm.core.protocol.Protocol;
@@ -104,6 +105,33 @@ public class GeminiCodec implements ProtocolCodec {
     @Override
     public Protocol protocol() {
         return Protocol.GEMINI;
+    }
+
+    /**
+     * 本协议的能力声明，依据如下：
+     * <ul>
+     *   <li>{@code streaming=true}：{@code :streamGenerateContent} 是官方并列端点，本心统一走 SSE 解码。</li>
+     *   <li>{@code toolCalling=true}：{@code tools[].functionDeclarations} + {@code functionCall} 为标准形态。</li>
+     *   <li>{@code parallelToolCalls=true}：单轮可返回多个 {@code functionCall} part（并行函数调用）。</li>
+     *   <li>{@code vision=true}：{@code inline_data} 原生支持图像等多模态输入。</li>
+     *   <li>{@code thinking=true}：2.5 系列起原生支持思考（{@code thinkingConfig} + thought part）。</li>
+     *   <li>{@code maxContextTokens=1_000_000}：1.5 / 2.x Pro 的百万级上下文窗口。</li>
+     * </ul>
+     * 注意：Gemini 系列跨度大（Flash 与 Pro 的窗口不同），此处取系列上限；
+     * 需要精确控制时请覆写本 Codec 或换用自己的能力声明。
+     */
+    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = ModelCapabilities.builder()
+            .streaming(true)
+            .toolCalling(true)
+            .parallelToolCalls(true)
+            .vision(true)
+            .thinking(true)
+            .maxContextTokens(1_000_000)
+            .build();
+
+    @Override
+    public ModelCapabilities capabilities() {
+        return RECOMMENDED_CAPABILITIES;
     }
 
     // ------------------------------------------------------------------ endpoint

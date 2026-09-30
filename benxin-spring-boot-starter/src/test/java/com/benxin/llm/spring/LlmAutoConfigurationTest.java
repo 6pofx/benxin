@@ -7,6 +7,9 @@ import com.benxin.llm.core.memory.InMemoryMemoryStore;
 import com.benxin.llm.core.memory.MemoryStore;
 import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.model.ModelRegistry;
+import com.benxin.llm.core.transport.HttpLlmModel;
+import com.benxin.llm.core.protocol.ProtocolRegistry;
+import com.benxin.llm.core.protocol.ProtocolCodec;
 import com.benxin.llm.core.prompt.SystemPromptProvider;
 import com.benxin.llm.core.sandbox.CompositeSandbox;
 import com.benxin.llm.core.sandbox.ToolSandbox;
@@ -286,6 +289,140 @@ class LlmAutoConfigurationTest {
                             .hasStackTraceContaining("llm.workflows.ghost")
                             .hasStackTraceContaining("不存在");
                 });
+    }
+
+    // ------------------------------------------------------------------
+    // 协议扩展点（F-3）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("协议注册表预置四个内置协议")
+    void protocolRegistryHasBuiltins() {
+        runner.run(context -> {
+            ProtocolRegistry registry = context.getBean(ProtocolRegistry.class);
+            assertThat(registry.ids()).containsExactly("openai", "anthropic", "gemini", "responses");
+        });
+    }
+
+    @Test
+    @DisplayName("容器里的 ProtocolCodec bean 会被收进注册表，配置里就能写这个协议名")
+    void protocolCodecBeansAreCollected() {
+        runner.withBean("tBedrockCodec", ProtocolCodec.class, StubProtocolCodec::new)
+                .withPropertyValues(
+                        "llm.default-model=bedrock-endpoint",
+                        "llm.models.bedrock-endpoint.protocol=bedrock",
+                        "llm.models.bedrock-endpoint.base-url=https://bedrock.internal",
+                        "llm.models.bedrock-endpoint.model=anthropic.claude-v2")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    // 注册表收下了它
+                    assertThat(context.getBean(ProtocolRegistry.class).ids()).contains("bedrock");
+                    // 而且真的被用来装配了那个模型（此前这个 bean 是完全惰性的）。
+                    // 注意 max-retries 默认是 2，所以拿到的模型外面还包着重试装饰器，需要 unwrap。
+                    LlmModel model = context.getBean(ModelRegistry.class).get("bedrock-endpoint");
+                    LlmModel inner = model.unwrap();
+                    assertThat(inner).isInstanceOf(HttpLlmModel.class);
+                    assertThat(((HttpLlmModel) inner).codec()).isInstanceOf(StubProtocolCodec.class);
+                });
+    }
+
+    @Test
+    @DisplayName("自定义 Codec 可以同名覆盖内置协议：protocol() 返回 openai 就顶掉内置实现")
+    void protocolCodecBeanCanOverrideBuiltin() {
+        runner.withBean("tOpenAiOverride", ProtocolCodec.class, () -> new StubProtocolCodec("openai"))
+                .withPropertyValues(
+                        "llm.default-model=m",
+                        "llm.models.m.protocol=openai",
+                        "llm.models.m.base-url=https://api.openai.com")
+                .run(context -> {
+                    ProtocolRegistry registry = context.getBean(ProtocolRegistry.class);
+                    // 覆盖发生在用户 bean 登记之后（内置先登记），因此拿到的是自定义实现
+                    assertThat(registry.find("openai").orElseThrow())
+                            .isInstanceOf(StubProtocolCodec.class);
+                    // 没被覆盖的内置协议不受影响
+                    assertThat(registry.find("responses").orElseThrow())
+                            .isInstanceOf(com.benxin.llm.core.protocol.responses.ResponsesApiCodec.class);
+                    // 装配出来的模型用的也是被覆盖后的 Codec（unwrap 掉默认的重试装饰器）
+                    LlmModel model = context.getBean(ModelRegistry.class).get("m");
+                    assertThat(((HttpLlmModel) model.unwrap()).codec()).isInstanceOf(StubProtocolCodec.class);
+                });
+    }
+
+    @Test
+    @DisplayName("配置里写未注册的协议名：启动期失败，报错列出可用协议与补救方式")
+    void unregisteredProtocolFailsStartupReadably() {
+        runner.withPropertyValues(
+                        "llm.models.ghost.protocol=ghost-protocol",
+                        "llm.models.ghost.base-url=https://x.invalid",
+                        "llm.models.ghost.model=whatever")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("未知协议")
+                            .hasStackTraceContaining("ghost-protocol")
+                            .hasStackTraceContaining("openai")
+                            .hasStackTraceContaining("responses")
+                            .hasStackTraceContaining("ProtocolCodec");
+                });
+    }
+
+    /** 一个最小的自定义协议实现，用于验证 bean → 注册表 → 装配这条链。 */
+    static class StubProtocolCodec implements ProtocolCodec {
+
+        private final String protocolId;
+
+        StubProtocolCodec() {
+            this("bedrock");
+        }
+
+        /** 指定协议 id，便于验证"同名覆盖内置"。 */
+        StubProtocolCodec(String protocolId) {
+            this.protocolId = protocolId;
+        }
+
+        @Override
+        public com.benxin.llm.core.protocol.Protocol protocol() {
+            return com.benxin.llm.core.protocol.Protocol.of(protocolId);
+        }
+
+        @Override
+        public String endpoint(com.benxin.llm.core.model.ModelConfig config,
+                               com.benxin.llm.core.chat.ChatRequest request) {
+            return "https://bedrock.internal/invoke";
+        }
+
+        @Override
+        public java.util.Map<String, String> headers(com.benxin.llm.core.model.ModelConfig config) {
+            return java.util.Map.of();
+        }
+
+        @Override
+        public String encode(com.benxin.llm.core.chat.ChatRequest request,
+                             com.benxin.llm.core.model.ModelConfig config) {
+            return "{}";
+        }
+
+        @Override
+        public com.benxin.llm.core.chat.ChatResponse decode(String responseBody,
+                                                            com.benxin.llm.core.model.ModelConfig config) {
+            return com.benxin.llm.core.chat.ChatResponse.builder()
+                    .message(com.benxin.llm.core.message.ChatMessage.assistant("")).build();
+        }
+
+        @Override
+        public com.benxin.llm.core.protocol.StreamDecoder newStreamDecoder(
+                com.benxin.llm.core.model.ModelConfig config,
+                com.benxin.llm.core.model.LlmStreamHandler handler) {
+            return new com.benxin.llm.core.protocol.StreamDecoder() {
+                @Override
+                public void accept(com.benxin.llm.core.protocol.SseEvent event) {
+                }
+
+                @Override
+                public void finish() {
+                }
+            };
+        }
     }
 
     /** 自定义 Loop：验证 {@code @LlmLoop} 注解上的名字而非类名被采用。 */

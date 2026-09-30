@@ -1,10 +1,10 @@
 package com.benxin.llm.core.model;
 
-import com.benxin.llm.core.model.impl.AnthropicModel;
-import com.benxin.llm.core.model.impl.GeminiModel;
-import com.benxin.llm.core.model.impl.OpenAiModel;
 import com.benxin.llm.core.model.impl.RetryingLlmModel;
 import com.benxin.llm.core.protocol.Protocol;
+import com.benxin.llm.core.protocol.ProtocolCodec;
+import com.benxin.llm.core.protocol.ProtocolRegistry;
+import com.benxin.llm.core.transport.HttpLlmModel;
 import com.benxin.llm.core.transport.HttpTransport;
 import com.benxin.llm.core.transport.JdkHttpTransport;
 import org.slf4j.Logger;
@@ -19,9 +19,10 @@ import java.util.Objects;
  *
  * <p>它承担两个装配职责：</p>
  * <ol>
- *   <li><b>按协议选预设</b>：{@code openai / anthropic / gemini} 分别装配成
- *       {@link OpenAiModel} / {@link AnthropicModel} / {@link GeminiModel}。
- *       加新协议时这里加一个分支即可，调用方（自动配置、测试、业务代码）不变。</li>
+ *   <li><b>按协议解析编解码器</b>：从 {@link ProtocolRegistry} 里取
+ *       {@link ProtocolCodec}，再连同配置与传输层装成 {@link HttpLlmModel}。
+ *       内置四协议在默认注册表里预先登记，使用者注册自己的 Codec 即可扩展或覆盖 ——
+ *       这里<b>没有任何 {@code switch}</b>，因为协议集合是运行期可变的。</li>
  *   <li><b>兑现 {@link ModelConfig#maxRetries()}</b>：配置里写了重试次数就自动包一层
  *       {@link RetryingLlmModel}。放在工厂里做而不是让每个调用方自己包，
  *       是为了保证"配置即行为"——用户改一行配置就能拿到重试，而装饰器顺序只有一处定义。</li>
@@ -33,9 +34,23 @@ public final class ModelFactory {
 
     private static final Logger log = LoggerFactory.getLogger(ModelFactory.class);
 
+    /**
+     * 未显式传入注册表时使用的默认注册表：只含本心内置四协议。
+     *
+     * <p>刻意<b>不</b>做成"全局可变单例"：那样用户的注册会泄漏到所有调用方，
+     * 测试之间也会互相污染。Spring 路径会传自己的注册表（内置 + 容器里的
+     * {@code ProtocolCodec} bean），裸 core 路径用这一份即可。</p>
+     */
+    private static final ProtocolRegistry DEFAULT_REGISTRY = ProtocolRegistry.withBuiltins();
+
     /** 工具类不允许实例化。 */
     private ModelFactory() {
         throw new AssertionError("ModelFactory 是工具类，不应被实例化");
+    }
+
+    /** 默认协议注册表（内置四协议，不可被外部修改）。 */
+    public static ProtocolRegistry defaultRegistry() {
+        return DEFAULT_REGISTRY;
     }
 
     /**
@@ -47,9 +62,19 @@ public final class ModelFactory {
      * @return 装配好的模型（可能是被 {@link RetryingLlmModel} 包装后的）
      */
     public static LlmModel create(ModelConfig config, HttpTransport transport) {
+        return create(config, transport, DEFAULT_REGISTRY);
+    }
+
+    /**
+     * 按配置装配模型，并使用指定的协议注册表解析编解码器。
+     *
+     * @param registry 协议注册表；为 null 时退化为默认注册表
+     */
+    public static LlmModel create(ModelConfig config, HttpTransport transport, ProtocolRegistry registry) {
         Objects.requireNonNull(config, "config 不能为 null");
         HttpTransport effective = transport == null ? new JdkHttpTransport() : transport;
-        LlmModel model = createByProtocol(config, effective);
+        ProtocolRegistry effectiveRegistry = registry == null ? DEFAULT_REGISTRY : registry;
+        LlmModel model = createByProtocol(config, effective, effectiveRegistry);
 
         int maxRetries = config.maxRetries();
         if (maxRetries <= 0) {
@@ -70,6 +95,11 @@ public final class ModelFactory {
         return create(config, new JdkHttpTransport());
     }
 
+    /** 使用 JDK 自带 HttpClient，并指定协议注册表。 */
+    public static LlmModel create(ModelConfig config, ProtocolRegistry registry) {
+        return create(config, new JdkHttpTransport(), registry);
+    }
+
     /**
      * 批量装配。
      *
@@ -83,6 +113,12 @@ public final class ModelFactory {
      * @param transport HTTP 传输实现，可为 null（退化为 JDK 实现）
      */
     public static Map<String, LlmModel> createAll(Map<String, ModelConfig> configs, HttpTransport transport) {
+        return createAll(configs, transport, DEFAULT_REGISTRY);
+    }
+
+    /** 批量装配，并使用指定的协议注册表。 */
+    public static Map<String, LlmModel> createAll(Map<String, ModelConfig> configs, HttpTransport transport,
+                                                  ProtocolRegistry registry) {
         Map<String, LlmModel> models = new LinkedHashMap<>();
         if (configs == null || configs.isEmpty()) {
             return models;
@@ -94,7 +130,7 @@ public final class ModelFactory {
                 // 同名配置缺失属于配置错误，静默跳过会让人排查半天，直接失败更快
                 throw new ModelException("模型配置 [" + key + "] 为 null，请检查 llm.models." + key + " 是否配置完整");
             }
-            LlmModel model = create(config, transport);
+            LlmModel model = create(config, transport, registry);
             models.put(key == null || key.isBlank() ? model.name() : key, model);
         }
         return models;
@@ -110,7 +146,13 @@ public final class ModelFactory {
      */
     public static ModelRegistry registry(Map<String, ModelConfig> configs, HttpTransport transport,
                                          String defaultName) {
-        Map<String, LlmModel> models = createAll(configs, transport);
+        return registry(configs, transport, defaultName, DEFAULT_REGISTRY);
+    }
+
+    /** 装配并注册到 {@link ModelRegistry}，并使用指定的协议注册表。 */
+    public static ModelRegistry registry(Map<String, ModelConfig> configs, HttpTransport transport,
+                                         String defaultName, ProtocolRegistry protocolRegistry) {
+        Map<String, LlmModel> models = createAll(configs, transport, protocolRegistry);
         ModelRegistry registry = new ModelRegistry();
         registry.registerAll(models);
 
@@ -126,20 +168,26 @@ public final class ModelFactory {
         return registry;
     }
 
-    /** 协议 → 预设的分派。协议枚举本身已覆盖内置三种，default 分支用于防御未来新增枚举值。 */
-    private static LlmModel createByProtocol(ModelConfig config, HttpTransport transport) {
+    /**
+     * 协议 → 编解码器的解析。查不到就报出"未知协议 + 已注册协议清单 + 怎么加"。
+     *
+     * <p>报错时机是<b>装配期</b>（Spring 路径下即上下文启动期），
+     * 而不是第一次请求时 —— 配置写错应当立刻可见。</p>
+     */
+    private static LlmModel createByProtocol(ModelConfig config, HttpTransport transport,
+                                             ProtocolRegistry registry) {
         Protocol protocol = config.protocol();
         if (protocol == null) {
-            throw new ModelException("模型 [" + config.name()
-                    + "] 未指定协议，可选: openai / anthropic / gemini");
+            throw new ModelException("模型 [" + config.name() + "] 未指定协议，可用协议: "
+                    + registry.describe());
         }
-        return switch (protocol) {
-            case OPENAI -> new OpenAiModel(config, transport);
-            case ANTHROPIC -> new AnthropicModel(config, transport);
-            case GEMINI -> new GeminiModel(config, transport);
-            default -> throw new ModelException("模型 [" + config.name() + "] 使用了不支持的协议 ["
-                    + protocol.id() + "]，本心内置支持: openai / anthropic / gemini");
-        };
+        ProtocolCodec codec = registry.find(protocol).orElseThrow(() -> new ModelException(
+                "模型 [" + config.name() + "] 使用了未知协议 [" + protocol.id() + "]，已注册的协议: "
+                        + registry.describe()
+                        + "。自定义协议请实现 ProtocolCodec 并把它交给容器（或注册进 ProtocolRegistry），"
+                        + "再把 llm.models." + config.name() + ".protocol 改成该协议名。"));
+        // 能力声明取自编解码器：它最清楚自己这套协议支持什么，自定义协议也因此不必再写一个模型类。
+        return new HttpLlmModel(config, codec, transport, codec.capabilities());
     }
 
     private static String firstKey(Map<String, LlmModel> models) {

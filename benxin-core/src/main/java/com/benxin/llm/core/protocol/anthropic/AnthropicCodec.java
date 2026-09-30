@@ -14,6 +14,7 @@ import com.benxin.llm.core.message.ThinkingPart;
 import com.benxin.llm.core.message.ToolResultPart;
 import com.benxin.llm.core.message.ToolUsePart;
 import com.benxin.llm.core.model.LlmStreamHandler;
+import com.benxin.llm.core.model.ModelCapabilities;
 import com.benxin.llm.core.model.ModelConfig;
 import com.benxin.llm.core.model.ModelException;
 import com.benxin.llm.core.protocol.Protocol;
@@ -74,6 +75,34 @@ public class AnthropicCodec implements ProtocolCodec {
     @Override
     public Protocol protocol() {
         return Protocol.ANTHROPIC;
+    }
+
+    /**
+     * 本协议的能力声明，依据如下：
+     * <ul>
+     *   <li>{@code streaming=true}：SSE 事件流（{@code message_start} / {@code content_block_delta} …）
+     *       是 Messages API 的一等能力。</li>
+     *   <li>{@code toolCalling=true}：{@code tools} 与 {@code tool_use} / {@code tool_result} 内容块是标准字段。</li>
+     *   <li>{@code parallelToolCalls=true}：一条 assistant 消息可返回多个 {@code tool_use} 块
+     *       （可用 {@code tool_choice.disable_parallel_tool_use} 关闭），故按"支持"声明。</li>
+     *   <li>{@code vision=true}：{@code image} 内容块（base64 / url 两种来源）为多模态标准形态。</li>
+     *   <li>{@code thinking=true}：扩展思考是官方能力——请求侧有 {@code thinking} 参数，
+     *       响应侧有 {@code thinking} 内容块与 {@code signature} 回传要求，本心统一映射为 {@code ThinkingPart}。</li>
+     *   <li>{@code maxContextTokens=200_000}：Claude 3 / 3.5 / 4 系列的通行上下文窗口。</li>
+     * </ul>
+     */
+    public static final ModelCapabilities RECOMMENDED_CAPABILITIES = ModelCapabilities.builder()
+            .streaming(true)
+            .toolCalling(true)
+            .parallelToolCalls(true)
+            .vision(true)
+            .thinking(true)
+            .maxContextTokens(200_000)
+            .build();
+
+    @Override
+    public ModelCapabilities capabilities() {
+        return RECOMMENDED_CAPABILITIES;
     }
 
     // ------------------------------------------------------------------ 端点
