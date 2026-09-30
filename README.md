@@ -351,6 +351,18 @@ llm:
 * **思考内容仅解析、不回传。** 与 Gemini 侧同一个取舍：`reasoning` item 需要配套的
   加密内容结构，而 `ThinkingPart` 只保存纯文本，硬塞回去多数端点会 400。
 
+**失败的工具结果怎么表达（四个协议的统一口径）：**
+
+| 协议 | 失败标记 |
+|---|---|
+| OpenAI Chat Completions | `content: "[error] " + 内容`（前缀标记） |
+| Anthropic | `is_error: true`（结构化字段） |
+| Gemini | `response.error` 与 `response.result` 二分 |
+| Responses | `output: "[error] " + 内容`（前缀标记 —— `function_call_output` 没有结构化的错误字段） |
+
+这条信息很重要：模型看到 `"工具炸了"` 时若无从判断这是工具正常返回的文本还是工具失败了，
+它会把错误当成合法结果继续往下走，而不是改方案或重试。四个协议都把它转成了可辨识的形式。
+
 ### 加自己的协议
 
 ```java
@@ -379,8 +391,14 @@ starter 会把容器里所有 `ProtocolCodec` bean 收进 `ProtocolRegistry`、`
 
 几个有用的细节：
 
-* **同名即覆盖。** 用户 bean 在内置之后登记，所以 `protocol()` 返回 `Protocol.OPENAI`
-  就能用自己的实现顶掉内置的 `openai`。
+* **同名即覆盖，但不再静默。** 用户 bean 在内置之后登记，所以 `protocol()` 返回
+  `Protocol.OPENAI` 就能用自己的实现顶掉内置的 `openai` —— 这是刻意保留的能力，
+  但注册时会打一条 WARN，因为它换掉的是**全应用的默认通道**。
+* **`protocol()` 不能返回空名字。** `Protocol.of(...)` 对 `null` / 空串 / 纯空白直接抛
+  `IllegalArgumentException`（消息里点名是哪个 Codec 干的），启动期就失败。
+  "缺省即 `openai`" 是配置项 `llm.models.<key>.protocol` 的默认值，由配置绑定层兜底 ——
+  标识类型不替调用方猜默认值，否则"我没填名字"与"我就是 openai"在类型层面无法区分，
+  一个半成品的 Codec 会把 OpenAI 通道悄悄换掉。
 * **能力声明归 Codec。** `capabilities()` 有默认值，自定义协议可以不写；但如果你的协议
   不支持流式或工具调用，**务必覆写它** —— Loop 会据此改变交互方式。
 * **未注册的协议仍然快速失败。** 配置里写了一个没有 Codec 的协议名，应用会在启动期

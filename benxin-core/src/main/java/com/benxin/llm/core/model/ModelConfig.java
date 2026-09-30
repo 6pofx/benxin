@@ -172,12 +172,19 @@ public final class ModelConfig {
         /**
          * 按 id 指定协议。
          *
-         * <p>{@link Protocol#of(String)} 接受<b>任意</b> id，因此这里不再对自定义协议名抛异常 ——
+         * <p>{@link Protocol#of(String)} 接受<b>任意</b>非空 id，因此这里不再对自定义协议名抛异常 ——
          * 该协议能不能用由 {@code ProtocolRegistry} 里有没有对应的 {@code ProtocolCodec} 决定，
          * 未注册时会在装配模型时给出可读报错并列出所有已注册协议。</p>
+         *
+         * <p><b>缺省 / 空白 = {@link Protocol#OPENAI}</b>：这个默认值属于
+         * {@code llm.models.<key>.protocol} 这个<b>配置项</b>，因此由配置绑定层兜底，
+         * 而不是由标识类型替调用方猜（见 F-46：标识类型里的"空 → openai"会让
+         * 一个 {@code protocol()} 返回空串的 Codec 静默顶掉内置 openai）。</p>
          */
         public Builder protocol(String protocol) {
-            this.protocol = Protocol.of(protocol);
+            this.protocol = protocol == null || protocol.isBlank()
+                    ? Protocol.OPENAI
+                    : Protocol.of(protocol);
             return this;
         }
 

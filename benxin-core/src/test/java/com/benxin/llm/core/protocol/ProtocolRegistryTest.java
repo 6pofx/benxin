@@ -123,10 +123,29 @@ class ProtocolRegistryTest {
     }
 
     @Test
-    @DisplayName("空值回落到 openai；from() 作为别名保留且语义与 of() 一致")
-    void blankFallsBackToOpenAi() {
-        assertThat(Protocol.of(null)).isSameAs(Protocol.OPENAI);
-        assertThat(Protocol.of("")).isSameAs(Protocol.OPENAI);
+    @DisplayName("空白 id 被拒绝，而不是回落到 openai；默认值改由配置绑定层兜底")
+    void blankIdIsRejectedInsteadOfFallingBackToOpenAi() {
+        // 标识类型不再替调用方猜默认值：否则"我没填名字"与"我就是 openai"在类型层面
+        // 无法区分，一个 protocol() 返回空串的 Codec 会静默占住内置 openai 那一格（F-46）。
+        assertThatThrownBy(() -> Protocol.of(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("协议 id 不能为空");
+        assertThatThrownBy(() -> Protocol.of(""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("协议 id 不能为空");
+        assertThatThrownBy(() -> Protocol.of("   "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("协议 id 不能为空");
+
+        // "缺省即 openai"是配置项的默认值，因此由 ModelConfig.Builder 兜底
+        assertThat(ModelConfig.builder("bx").protocol("").build().protocol()).isSameAs(Protocol.OPENAI);
+        assertThat(ModelConfig.builder("bx").protocol((String) null).build().protocol())
+                .isSameAs(Protocol.OPENAI);
+        assertThat(ModelConfig.builder("bx").build().protocol()).as("完全不设置时也是 openai")
+                .isSameAs(Protocol.OPENAI);
+        assertThat(ModelConfig.builder("bx").protocol("  ").build().protocol()).isSameAs(Protocol.OPENAI);
+
+        // from() 是 of() 的别名，语义一致
         assertThat(Protocol.from("anthropic")).isSameAs(Protocol.ANTHROPIC);
         // 语义变更点：从前 from("bedrock") 会抛，现在不会
         assertThat(Protocol.from("bedrock").id()).isEqualTo("bedrock");

@@ -261,8 +261,12 @@ public final class ResponsesApiCodec implements ProtocolCodec {
             ObjectNode item = input.addObject();
             item.put("type", "function_call_output");
             item.put("call_id", resolveCallId(result.toolUseId()));
-            // output 支持字符串或内容块数组；纯文本时用字符串最兼容
-            item.put("output", result.content());
+            // output 支持字符串或内容块数组；纯文本时用字符串最兼容。
+            // 失败结果必须带上可辨识的标记：Responses 的 function_call_output 没有
+            // is_error 之类的结构化字段，因此与 OpenAI Chat Completions 侧保持同一思路，
+            // 加 [error] 前缀。少了它，模型看到"工具炸了"时无从判断这是工具正常返回的文本
+            // 还是工具失败了，于是会把错误当成合法结果继续往下走，而不是改方案或重试。
+            item.put("output", result.error() ? "[error] " + result.content() : result.content());
         }
     }
 

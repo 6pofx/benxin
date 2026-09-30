@@ -1,5 +1,8 @@
 package com.benxin.llm.core.protocol;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -38,6 +41,8 @@ import java.util.function.Supplier;
  */
 public final class ProtocolRegistry {
 
+    private static final Logger log = LoggerFactory.getLogger(ProtocolRegistry.class);
+
     /** 一个登记项：要么是现成实例，要么是工厂，二者必居其一。 */
     private static class Entry {
         private final ProtocolCodec singleton;
@@ -75,17 +80,35 @@ public final class ProtocolRegistry {
     /**
      * 登记一个现成的编解码器实例，键取 {@link ProtocolCodec#protocol()}。
      *
+     * <p>覆盖内置协议是文档承诺的能力（例如让 {@code protocol: openai} 走自己的报文实现），
+     * 因此<b>不禁止</b> —— 但会打一条 WARN：静默换掉内置通道，排查成本太高。</p>
+     *
      * @return this，便于链式登记
+     * @throws IllegalArgumentException {@code protocol()} 返回 null 或空白 id 时抛出，
+     *         消息里点名实现类
      */
     public synchronized ProtocolRegistry register(ProtocolCodec codec) {
         if (codec == null) {
             return this;
         }
-        Protocol protocol = codec.protocol();
+        Protocol protocol;
+        try {
+            protocol = codec.protocol();
+        } catch (IllegalArgumentException e) {
+            // 例如 protocol() 返回 Protocol.of("")：把"哪个 Codec 干的好事"补进消息里，
+            // 否则使用者只看到一句"协议 id 不能为空"，还得自己去翻是谁返回的
+            throw new IllegalArgumentException("ProtocolCodec [" + codec.getClass().getName()
+                    + "] 的 protocol() 非法：" + e.getMessage(), e);
+        }
         if (protocol == null) {
             // 协议为 null 的 Codec 无法被任何配置引用，静默忽略会让人排查半天
             throw new IllegalArgumentException("ProtocolCodec [" + codec.getClass().getName()
                     + "] 的 protocol() 返回 null，无法登记");
+        }
+        if (Protocol.isBuiltin(protocol)) {
+            log.warn("[benxin] 自定义协议 [{}] 顶掉了同名的内置协议实现 ← {}；"
+                            + "覆盖内置协议是允许的，若非本意请检查 protocol() 的返回值",
+                    protocol.id(), codec.getClass().getName());
         }
         codecs.put(protocol.id(), new Entry(codec, null));
         return this;
