@@ -30,6 +30,7 @@ public interface WeatherAssistant {
 - [模块结构](#模块结构)
 - [运行示例](#运行示例)
 - [设计取舍](#设计取舍)
+- [版本与升级](#版本与升级)
 
 ---
 
@@ -74,7 +75,7 @@ public interface WeatherAssistant {
 <dependency>
     <groupId>com.benxin</groupId>
     <artifactId>benxin-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
@@ -940,7 +941,7 @@ mvn -o spring-boot:run        # 启动即打印 7 个演示
 或者直接跑打好的可执行包：
 
 ```bash
-java -jar benxin-examples/target/benxin-examples-1.0.0.jar
+java -jar benxin-examples/target/benxin-examples-1.1.0.jar
 ```
 
 示例默认使用**离线 Mock 模型**：不联网、不花钱，但完整跑通
@@ -1037,6 +1038,53 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 
 ---
 
+## 版本与升级
+
+当前版本 **1.1.0**（上一个发布版本是 `v1.0.0`）。
+
+### 1.1.0 新增
+
+| 项 | 说明 |
+|---|---|
+| **四个内置协议** | 除 openai / anthropic / gemini 外新增 **OpenAI Responses API**（`protocol: responses`）—— `input[]` item 列表、顶层 `instructions`、扁平 `tools[]`、命名 SSE 事件 |
+| **协议扩展点** | `Protocol` 由封闭枚举改为**可扩展标识类型** + 新增 `ProtocolRegistry`：注册一个 `ProtocolCodec` bean 就能在配置里写 `protocol: bedrock`，见[加自己的协议](#加自己的协议) |
+| **工作流模式** | 两个新 Loop：`workflow`（声明式图编排，六种节点 + 条件表达式 + `${}` 模板）与 `staged`（规划 → 执行 → 验收 → 修复 → 汇总） |
+| **枚举之外的 Loop** | 内置 Loop 增至 8 个（`dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged`） |
+| **子代理可观测** | 子代理用量补记进父上下文；新增 `SubAgentObserver` 观察点，自定义 Loop 能在真实派生路径上收到通知 |
+| **46 条实测缺陷修复** | 由独立集成测试工程 `benxin_test`（493 个测试）逐条实测并复验 |
+
+### ⚠️ 升级注意
+
+**源码级破坏性变更（`Protocol` 由 enum 改为类）：**
+
+| 写法 | 影响 |
+|---|---|
+| `Protocol.OPENAI` 等常量 | ✅ 不变 |
+| `switch (protocol) { case OPENAI -> ... }` | ❌ 不再可编译（枚举专用语法） |
+| `Protocol.values()` | ❌ 改为 `Protocol.builtins()` / `Protocol.builtinIds()` |
+| `EnumSet<Protocol>` / `ordinal()` | ❌ 不再适用 |
+| `Protocol.from("未知")` 抛异常 | ⚠️ 不再抛（改为接受任意非空 id，未注册的协议在装配期报错并列清单） |
+| `Protocol.of(null / "")` | ⚠️ 现在**抛异常**（不再回落 `openai`）；配置项缺省仍由绑定层兜底为 `openai` |
+
+**行为变更**（都朝着"少一点静默、多一点如实"的方向，但会改变既有项目的可观测行为）：
+
+| 位置 | 1.0.0 | 1.1.0 |
+|---|---|---|
+| `@EnableLlmAgents` | README 说可省 | **必写**（不写则一个 `@LlmAgent` 接口都不注册） |
+| 默认沙箱 | `builtin-enabled=false` 时是 `permissive` | **真正的围栏**：自己写的工具同样受 `PathSandbox` 约束 |
+| 沙箱拒绝 vs 审批 | `ON_FAILURE` + 会批准的 handler 可推翻 | 沙箱拒绝是**硬约束**，不可被审批覆盖 |
+| `llm.models.<key>.model` | 被注册名覆盖，配置项不生效 | **真的下发到上游** |
+| `llm.tools.denied-commands` | 整体替换内置黑名单 | **追加**在内置那批之上 |
+| `llm.tools.enabled` | 增量（叠加只读基线） | 不变，但点名写/执行类工具即等于授权（不再"看得见跑不动"） |
+| 未知 Agent 名的 HTTP 请求 | 500 | **404** |
+| 不传 `sessionId` 的 HTTP 调用 | 共享 `<agent>-default` 会话 | **每次一个独立会话**（要续接历史请显式传） |
+| `AgentSpec.Builder.maxSteps(<=0)` | 静默回落 24 | **直接报错** |
+| `llm.agent.hard-max-steps` | 只夹注解路径 | 下沉到 `AgentBuilder.build()`（程序化装配需自己调 `.hardMaxSteps(n)`） |
+| 工作流 tool 节点的失败 | 当成该节点的正常输出流下去 | **节点级失败**，触发 `retry` / `continueOnError` |
+| Gemini 流式用量 | 累计值被逐帧透传（数字偏大） | 换算成增量，与非流式一致 |
+
+---
+
 ## 测试
 
 ```bash
@@ -1065,7 +1113,7 @@ mvn -o test
 | `WorkflowLoopTest` | 9 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
-| `LlmAutoConfigurationTest` | 18 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册 |
+| `LlmAutoConfigurationTest` | 22 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）** |
 | `LlmAgentProxyTest` | 17 | **注解接口 → 代理 → 运行时 → 模型** 全链路：参数语义、`@Ctx` 不泄漏、`@SystemPrompt` 渲染、DTO 返回、流式回调、多轮记忆、工具装配、单例与 Object 方法 |
 | `BenxinExampleApplicationTest` | 14 | 示例应用装配：6 个 Agent、7 个 Loop、离线模型、工具扫描、安全默认值、声明式工作流 |
 

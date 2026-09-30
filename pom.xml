@@ -13,7 +13,7 @@
 
     <groupId>com.benxin</groupId>
     <artifactId>benxin</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <packaging>pom</packaging>
 
     <name>benxin</name>
@@ -46,7 +46,7 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <benxin.version>1.0.0</benxin.version>
+        <benxin.version>1.1.0</benxin.version>
         <maven-compiler-plugin.version>3.14.0</maven-compiler-plugin.version>
         <!-- Spring Boot 3.5.5 管理的 Jackson 版本，此处仅作文档化引用 -->
         <jackson.version>2.19.2</jackson.version>
