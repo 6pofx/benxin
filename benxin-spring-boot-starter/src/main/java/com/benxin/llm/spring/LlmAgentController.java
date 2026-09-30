@@ -10,9 +10,13 @@ import com.benxin.llm.core.model.ModelRegistry;
 import com.benxin.llm.core.loop.LoopRegistry;
 import com.benxin.llm.core.tool.ToolInvocation;
 import com.benxin.llm.core.tool.ToolResult;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,10 +27,12 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,6 +43,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>默认关闭是刻意的：这是一个能触发模型调用、并可能间接驱动本地工具执行的入口，
  * 在没有鉴权的情况下不应该因为"引了依赖"就自动对外。</p>
+ *
+ * <p><b>端点上的几条实际契约</b>（README 里也有一张同样的表，免得只能靠读源码才知道）：</p>
+ * <ul>
+ *   <li>未知 Agent 名 → <b>404</b>（{@link NoSuchAgentException} 被映射成 HTTP 状态码）；</li>
+ *   <li>不传 {@code sessionId} → 每次调用一个独立会话（响应里的 {@code sessionId} 是新生成的），
+ *       想续接历史必须显式传；</li>
+ *   <li>端点按 <b>Agent 名</b>调用，不经过方法绑定：{@code @SystemPrompt} / {@code @Ctx} /
+ *       {@code @User} 这些<b>方法级</b>注解在 HTTP 端点上不生效，只认 Agent 级 {@code systemPrompt}；</li>
+ *   <li>失败的运行只广播 {@code onError}，不会产生 {@code agent_run} 行；</li>
+ *   <li>{@code @LlmAgent} 不声明 {@code tools} / {@code toolNames} 时继承容器的全局工具表。</li>
+ * </ul>
  */
 @RestController
 @RequestMapping("${llm.web.base-path:/llm}")
@@ -97,26 +114,38 @@ public class LlmAgentController {
     @PostMapping(value = "/agents/{name}/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> chat(@PathVariable String name, @RequestBody ChatPayload payload) {
         Agent agent = agentRegistry.get(name);
-        AgentResult result = agent.call(payload.message(), payload.sessionId(), null);
+        // 不传 sessionId 时给一次独立的会话，而不是落到 "<agentName>-default" 上：
+        // 后者会让"每次调用看似独立"的直觉与"其实共享同一份历史"的行为对不上，
+        // 多路调用还会互相串历史。需要续接历史时显式传 sessionId 即可。
+        String sessionId = payload.sessionId() == null || payload.sessionId().isBlank()
+                ? "http-" + UUID.randomUUID()
+                : payload.sessionId();
+        AgentResult result = agent.call(payload.message(), sessionId, null);
         return toMap(result);
     }
 
     /**
      * 流式对话（SSE）。事件类型：{@code delta} / {@code thinking} / {@code tool_call} /
-     * {@code tool_result} / {@code done} / {@code error}。
+     * {@code done} / {@code error}。
+     *
+     * <p>刻意<b>不</b>包含 {@code tool_result}：{@code LlmStreamHandler} 上根本没有对应的回调，
+     * 这个事件名发不出来。工具结果只出现在最终 {@code done} 事件里的 {@code toolCalls} 中。</p>
      */
     @GetMapping(value = "/agents/{name}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@PathVariable String name,
                             @RequestParam("message") String message,
                             @RequestParam(value = "sessionId", required = false) String sessionId) {
         Agent agent = agentRegistry.get(name);
+        String effectiveSession = sessionId == null || sessionId.isBlank()
+                ? "http-" + UUID.randomUUID()
+                : sessionId;
         SseEmitter emitter = new SseEmitter(0L);
         emitter.onTimeout(emitter::complete);
         emitter.onError(e -> emitter.complete());
 
         CompletableFuture.runAsync(() -> {
             try {
-                AgentResult result = agent.call(message, sessionId, new SseForwarder(emitter));
+                AgentResult result = agent.call(message, effectiveSession, new SseForwarder(emitter));
                 send(emitter, "done", toMap(result));
                 emitter.complete();
             } catch (RuntimeException e) {
@@ -126,6 +155,24 @@ public class LlmAgentController {
             }
         }, EXECUTOR);
         return emitter;
+    }
+
+    /**
+     * 未知 Agent 名 → 404（而不是 500）。
+     *
+     * <p>以前它和所有其它 {@code IllegalArgumentException} 一起被当成服务端错误，
+     * 使用者按直觉猜"名字写错了应该是 404"，拿到的却是 500，只能去翻日志。</p>
+     */
+    @ExceptionHandler(NoSuchAgentException.class)
+    public ResponseEntity<Map<String, Object>> handleUnknownAgent(NoSuchAgentException error,
+                                                                  HttpServletRequest request) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", HttpStatus.NOT_FOUND.value());
+        body.put("error", HttpStatus.NOT_FOUND.getReasonPhrase());
+        body.put("message", error.getMessage());
+        body.put("path", request == null ? null : request.getRequestURI());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
     }
 
     private static void send(SseEmitter emitter, String event, Object data) {

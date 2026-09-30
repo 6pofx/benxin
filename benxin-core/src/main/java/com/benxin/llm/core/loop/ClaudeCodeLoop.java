@@ -48,7 +48,7 @@ import java.util.Set;
  * </ol>
  */
 @LlmLoop("claude-code")
-public class ClaudeCodeLoop extends AbstractAgentLoop {
+public class ClaudeCodeLoop extends AbstractAgentLoop implements SubAgentObserver {
 
     /** Loop 名。 */
     public static final String NAME = "claude-code";
@@ -85,6 +85,9 @@ public class ClaudeCodeLoop extends AbstractAgentLoop {
 
     /** 系统提示词兜底已注入标记。 */
     private static final String ATTR_FALLBACK_PROMPT = "benxin.claude-code.fallbackPromptInjected";
+
+    /** 兜底系统提示词的首行标记：既是对使用者的说明，也是"历史里是否已有它"的判据。 */
+    private static final String FALLBACK_MARKER = "【本心内置系统提示｜claude-code】";
 
     /** 待办提醒的间隔步数。 */
     private static final int TODO_REMINDER_INTERVAL = 4;
@@ -231,11 +234,36 @@ public class ClaudeCodeLoop extends AbstractAgentLoop {
         if (Boolean.TRUE.equals(get(ctx, ATTR_FALLBACK_PROMPT))) {
             return;
         }
+        // 开了记忆时历史会跨运行保留，而"本 run 注入过没有"这个属性每次运行都是新的。
+        // 只看属性会让兜底提示随历史线性累积（第 N 次运行就重复 N 份），
+        // 既浪费上下文预算（这段提示很长），又让模型看到重复的自我描述。
+        // 因此注入前先看一眼历史里是不是已经有它了。
+        if (historyContains(ctx, FALLBACK_MARKER)) {
+            put(ctx, ATTR_FALLBACK_PROMPT, Boolean.TRUE);
+            log.debug("[claude-code] 历史里已存在内置兜底提示词，跳过重复注入");
+            return;
+        }
         String fallback = PromptTemplates.claudeCode(promptContext(ctx));
-        ctx.append(ChatMessage.user("【本心内置系统提示｜claude-code】\n" + fallback));
+        ctx.append(ChatMessage.user(FALLBACK_MARKER + "\n" + fallback));
         put(ctx, ATTR_FALLBACK_PROMPT, Boolean.TRUE);
         ctx.emit("claude-code.system-prompt-fallback", "ctx.systemPrompt() 为空，已注入内置提示词");
         log.debug("[claude-code] 系统提示词为空，已注入内置兜底提示词（{} 字符）", fallback.length());
+    }
+
+    /** 历史里是否已经出现过给定标记（用于让"每次运行注入一次"的提示词真正幂等）。 */
+    private boolean historyContains(LoopContext ctx, String marker) {
+        try {
+            for (ChatMessage message : ctx.messages()) {
+                String text = message.text();
+                if (text != null && text.contains(marker)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException e) {
+            // 自定义 LoopContext 的历史不可读时按"没有"处理，绝不能因此中断主循环
+            log.debug("[claude-code] 历史不可读，跳过去重检查: {}", e.toString());
+        }
+        return false;
     }
 
     private PromptContext promptContext(LoopContext ctx) {
@@ -594,11 +622,13 @@ public class ClaudeCodeLoop extends AbstractAgentLoop {
     // ------------------------------------------------------------------
 
     /**
-     * 派生一个子代理执行独立任务（供 {@code task} 工具经由
-     * {@code ToolContext.spawn} → {@code LoopContext.spawnSubAgent} 调用）。
+     * 派生一个子代理执行独立任务。
      *
-     * <p>{@code doRun} 不会主动派生子代理——是否值得派生由模型决定；这里只负责把子代理的
-     * 用量补记到父上下文，并发一个事件出来，方便外部观测子任务的边界。</p>
+     * <p><b>它不再是死代码：</b>本类实现了 {@link SubAgentObserver}，于是真实路径
+     * （{@code task} 工具 → {@code ToolContext.spawn} → {@code DefaultLoopContext.spawn}）
+     * 上的每一次派生都会回调 {@link #onSubAgentStart} / {@link #onSubAgentEnd}，
+     * 由它们负责发事件；用量补记则由 {@code DefaultLoopContext} 统一做掉。
+     * 本方法保留下来只是给"想主动派生一次子任务"的调用方一个直白入口。</p>
      *
      * @param ctx           当前 Loop 上下文
      * @param subAgentName  子代理名；为空时用构造器配置的默认名
@@ -615,18 +645,23 @@ public class ClaudeCodeLoop extends AbstractAgentLoop {
         if (prompt == null || prompt.isBlank()) {
             throw new IllegalArgumentException("派生 [" + name + "] 时必须给出完整指令（子代理看不到当前对话）");
         }
-        ctx.emit("claude-code.subagent-start", Map.of("subAgent", name, "promptChars", prompt.length()));
         // 只传递明确的父子关系信息，不透传父上下文的全部属性（避免子任务被父任务的状态污染）
-        AgentResult result = ctx.spawnSubAgent(name, prompt,
+        return ctx.spawnSubAgent(name, prompt,
                 Map.of("parentAgent", ctx.agentName(), "parentStep", ctx.step()));
-        if (result != null) {
-            addUsage(ctx, result.usage());
-            ctx.emit("claude-code.subagent-end", Map.of(
-                    "subAgent", name,
-                    "steps", result.steps(),
-                    "textChars", result.text() == null ? 0 : result.text().length()));
-        }
-        return result;
+    }
+
+    @Override
+    public void onSubAgentStart(LoopContext ctx, String subAgentName, String prompt) {
+        ctx.emit("claude-code.subagent-start",
+                Map.of("subAgent", subAgentName, "promptChars", prompt == null ? 0 : prompt.length()));
+    }
+
+    @Override
+    public void onSubAgentEnd(LoopContext ctx, String subAgentName, AgentResult result) {
+        ctx.emit("claude-code.subagent-end", Map.of(
+                "subAgent", subAgentName,
+                "steps", result.steps(),
+                "textChars", result.text() == null ? 0 : result.text().length()));
     }
 
     /** 当前 Agent 是否支持子代理（对自定义 LoopContext 也安全）。 */

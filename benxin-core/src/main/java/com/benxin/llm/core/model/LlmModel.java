@@ -33,7 +33,11 @@ public interface LlmModel {
         if (!thinking.isEmpty()) {
             handler.onThinkingDelta(thinking);
         }
-        response.message().toolUses().forEach(handler::onToolCall);
+        // message 允许为 null（例如只回 finishReason 的空响应），这里必须与上面的
+        // thinking 取值保持同一套保护，否则一个"什么都没说"的响应会在默认 stream() 上 NPE。
+        if (response.message() != null) {
+            response.message().toolUses().forEach(handler::onToolCall);
+        }
         handler.onUsage(response.usage());
         handler.onComplete(response);
     }

@@ -65,7 +65,7 @@ public class AgentRegistry {
     }
 
     public Agent get(String name) {
-        return find(name).orElseThrow(() -> new IllegalArgumentException(
+        return find(name).orElseThrow(() -> new NoSuchAgentException(name,
                 "未找到 Agent [" + name + "]，已注册: " + names()));
     }
 

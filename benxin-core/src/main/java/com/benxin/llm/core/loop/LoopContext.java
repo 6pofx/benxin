@@ -128,7 +128,7 @@ public interface LoopContext {
     /** 把历史交给上下文管理器组装成最终下发请求。 */
     default ChatRequest buildRequest() {
         return ChatRequest.builder()
-                .model(spec() == null ? null : spec().model())
+                // 不下发 spec().model()：它是模型注册名，不是上游模型 id（详见 HttpLlmModel#merge）
                 .messages(contextManager().prepare(systemPrompt(), messages(), model()))
                 .tools(tools().specs())
                 .temperature(spec() == null || spec().temperature() < 0 ? null : spec().temperature())

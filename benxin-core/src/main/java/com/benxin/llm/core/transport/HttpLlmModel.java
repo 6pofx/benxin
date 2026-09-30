@@ -99,6 +99,15 @@ public class HttpLlmModel implements LlmModel {
                     + Json.abbreviate(response.body()), response.status(), null));
             return;
         }
+        if (!response.isStreaming()) {
+            // 传输层在 postStreaming 里返回了非流式响应。以前这会一路走到
+            // SseParser.parse(null) 报一个 NPE，使用者看不出问题出在自己的传输层实现上。
+            downstream.onError(new ModelException("模型 [" + name() + "] 的传输层在 postStreaming() 里"
+                    + "返回了非流式响应（TransportResponse.of(...)）；声明式路径恒为流式，"
+                    + "自定义 HttpTransport 必须实现 postStreaming 并返回 TransportResponse.streaming(...)"
+                    + (response.body() == null ? "" : "。响应体: " + Json.abbreviate(response.body()))));
+            return;
+        }
         StreamDecoder decoder = codec.newStreamDecoder(config, downstream);
         try (InputStream in = response.stream()) {
             SseParser.parse(in, decoder::accept);
@@ -184,7 +193,19 @@ public class HttpLlmModel implements LlmModel {
     /** 把配置里的默认参数合并进请求；请求显式设置的优先。 */
     private ChatRequest merge(ChatRequest request, boolean stream) {
         ChatRequest.Builder b = request.toBuilder().stream(stream);
-        if (request.model() == null || request.model().isBlank()) {
+        String requested = request.model();
+        // 注意 model 这个字段的两种含义：Agent 运行时会把「模型注册名」（registry key）
+        // 放进 ChatRequest.model，而注册名不是上游能识别的模型 id（见 LlmAgentFactory）。
+        // 所以这里只在两种情况下才让请求里的值生效：
+        //   ① 配置没写 model —— 没有更权威的取值；
+        //   ② 请求里的值与这个端点自己的注册名不同 —— 那是调用方在"按请求显式覆盖"。
+        boolean explicitOverride = requested != null && !requested.isBlank()
+                && !requested.equals(config.name());
+        if (explicitOverride) {
+            b.model(requested);
+        } else if (config.model() != null && !config.model().isBlank()) {
+            b.model(config.model());
+        } else if (requested == null || requested.isBlank()) {
             b.model(config.resolveModel(request));
         }
         if (request.temperature() == null && config.temperature() != null) {

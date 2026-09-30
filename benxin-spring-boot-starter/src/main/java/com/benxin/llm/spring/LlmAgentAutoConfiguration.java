@@ -1,7 +1,6 @@
 package com.benxin.llm.spring;
 
 import com.benxin.llm.core.context.ContextManager;
-import com.benxin.llm.core.hook.AgentInterceptor;
 import com.benxin.llm.core.hook.AgentListener;
 import com.benxin.llm.core.loop.LoopRegistry;
 import com.benxin.llm.core.memory.MemoryStore;
@@ -46,10 +45,10 @@ public class LlmAgentAutoConfiguration {
                                            ToolSandbox sandbox,
                                            ApprovalHandler approvalHandler,
                                            AgentRegistry agentRegistry,
-                                           ObjectProvider<AgentInterceptor> interceptors,
+                                           ObjectProvider<LlmInterceptorChain> interceptorChains,
                                            ObjectProvider<AgentListener> listeners) {
         return new LlmAgentFactory(properties, modelRegistry, loopRegistry, toolCatalog,
                 contextManager, memoryStore, systemPromptProvider, sandbox, approvalHandler,
-                agentRegistry, interceptors, listeners);
+                agentRegistry, interceptorChains, listeners);
     }
 }

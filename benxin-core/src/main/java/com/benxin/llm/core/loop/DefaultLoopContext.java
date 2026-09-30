@@ -189,7 +189,9 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         listener.onStepStart(agentName(), current);
 
         ChatRequest request = ChatRequest.builder()
-                .model(spec().model())
+                // 刻意不把 spec().model()（= 模型注册名）塞进 ChatRequest.model：
+                // 那个字段的语义是"下发给上游的模型 id"，由 HttpLlmModel 从 ModelConfig 取。
+                // 把注册名混进去会让 `llm.models.<key>.model` 被静默覆盖成 key 本身。
                 .messages(contextManager().prepare(systemPrompt, history, model()))
                 .tools(tools().specs())
                 .temperature(spec().temperature() < 0 ? null : spec().temperature())
@@ -257,9 +259,14 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
             }
         });
 
-        model().stream(request, collector);
-        if (collector.error() != null) {
-            Throwable cause = collector.error();
+        if (model().capabilities().streaming()) {
+            model().stream(request, collector);
+        } else {
+            // 模型明确声明"不支持流式"：走同步通道，于是自定义传输层的 post() 与
+            // 编解码器的 decode() 在声明式路径上也是可达的（以前它们恒为死代码）。
+            callModelSynchronously(request, collector);
+        }
+        if (collector.error() != null) {            Throwable cause = collector.error();
             if (cause instanceof RuntimeException runtime) {
                 throw runtime;
             }
@@ -289,6 +296,43 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         if (message != null) {
             messages.add(message);
         }
+    }
+
+    /**
+     * 非流式模型的一次调用：{@code chat()} 拿到完整响应后，把它"回放"成与流式一致的事件序列。
+     *
+     * <p>这样做的意义有两层：</p>
+     * <ol>
+     *   <li>声明式路径不再假定"所有模型都能流式"。以前 {@code callModel} 无条件调用
+     *       {@code stream()}，只是靠 {@code LlmModel.stream()} 的默认实现转调 {@code chat()}
+     *       才没出错 —— 自定义传输层若只实现了 {@code post()} 与 {@code decode()}，
+     *       在 Agent 路径上等于一行都跑不到。</li>
+     *   <li>订阅方（监听器 / SSE 前端）看到的事件序列与流式路径保持同构，
+     *       不必为"模型支不支持流式"写两套渲染逻辑。</li>
+     * </ol>
+     */
+    private void callModelSynchronously(ChatRequest request, StreamCollector collector) {
+        ChatResponse response = model().chat(request);
+        collector.onStart();
+        if (response == null) {
+            collector.onError(new com.benxin.llm.core.model.ModelException(
+                    "模型 [" + model().name() + "] 的 chat() 返回了 null"));
+            return;
+        }
+        ChatMessage message = response.message();
+        if (message != null) {
+            for (com.benxin.llm.core.message.ContentPart part : message.parts()) {
+                if (part instanceof com.benxin.llm.core.message.TextPart textPart) {
+                    collector.onTextDelta(textPart.text());
+                } else if (part instanceof com.benxin.llm.core.message.ThinkingPart thinkingPart) {
+                    collector.onThinkingDelta(thinkingPart.text());
+                } else if (part instanceof ToolUsePart toolUse) {
+                    collector.onToolCall(toolUse);
+                }
+            }
+        }
+        collector.onUsage(response.usage());
+        collector.onComplete(response);
     }
 
     // ---------- 工具执行 ----------
@@ -379,14 +423,11 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         long start = System.nanoTime();
 
         // 1. 沙箱守门
+        // 沙箱拒绝是硬约束，不可被审批覆盖：ON_FAILURE 的语义是"工具执行失败后再问一次"，
+        // 而"这条路径/这条命令不该被执行"是使用者在配置里写死的边界，不是一次运行期的失败。
+        // 以前这里在 ON_FAILURE 下会把沙箱拒绝交给审批 handler，配一个会批准的 handler
+        // （插件默认 bean 正是 autoApprove）就等于把沙箱降级成了软约束。
         ToolSandbox.Decision decision = sandbox().check(call);
-        if (decision.denied() && approvalPolicy() == ApprovalPolicy.ON_FAILURE) {
-            boolean approved = approvalHandler().approve(new ApprovalHandler.ApprovalRequest(
-                    call.toolName(), call.arguments(), "沙箱拒绝：" + decision.reason(), agentName(), sessionId()));
-            if (approved) {
-                decision = ToolSandbox.Decision.allow();
-            }
-        }
         if (decision.denied()) {
             result = decision.toToolResult();
         } else if (needsApproval(call, callback)
@@ -469,11 +510,7 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
 
     @Override
     public AgentResult spawnSubAgent(String subAgentName, String prompt, Map<String, Object> extra) {
-        AgentResult result = agent.spawn(subAgentName, prompt, extra, listener(), agentName());
-        synchronized (toolLock) {
-            attributes.put("lastSubAgent", subAgentName);
-        }
-        return result;
+        return spawnAndRecord(subAgentName, prompt, extra);
     }
 
     @Override
@@ -483,11 +520,39 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
 
     @Override
     public Optional<AgentResult> spawn(String name, String prompt, Map<String, Object> extra) {
-        AgentResult result = agent.spawn(name, prompt, extra, listener(), agentName());
-        synchronized (toolLock) {
-            attributes.put("lastSubAgent", name);
+        return Optional.of(spawnAndRecord(name, prompt, extra));
+    }
+
+    /**
+     * 派生子代理的唯一出口：在这里把"谁都需要做"的两件事做掉。
+     *
+     * <ol>
+     *   <li><b>用量补记</b>：子代理消耗的 token 属于这次运行的真实成本。以前它凭空消失，
+     *       做成本核算会系统性低估多代理任务（子代理跑得越多，低估越严重）。</li>
+     *   <li><b>观察点通知</b>：Loop 若实现 {@link SubAgentObserver}，就能在<b>真实</b>派生路径上
+     *       收到开始/结束通知，而不是守着一个永远不会被调用的备用方法。</li>
+     * </ol>
+     */
+    private AgentResult spawnAndRecord(String subAgentName, String prompt, Map<String, Object> extra) {
+        SubAgentObserver observer = subAgentObserver();
+        if (observer != null) {
+            observer.onSubAgentStart(this, subAgentName, prompt);
         }
-        return Optional.of(result);
+        AgentResult result = agent.spawn(subAgentName, prompt, extra, listener(), agentName());
+        if (result != null) {
+            addUsage(result.usage());
+        }
+        if (observer != null && result != null) {
+            observer.onSubAgentEnd(this, subAgentName, result);
+        }
+        synchronized (toolLock) {
+            attributes.put("lastSubAgent", subAgentName);
+        }
+        return result;
+    }
+
+    private SubAgentObserver subAgentObserver() {
+        return agent.loop() instanceof SubAgentObserver observer ? observer : null;
     }
 
     // ---------- 事件 ----------

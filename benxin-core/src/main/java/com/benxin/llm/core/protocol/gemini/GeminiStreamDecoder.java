@@ -31,10 +31,11 @@ import java.util.List;
  *   <li>{@code functionCall} 一次性给全，不存在 {@code arguments} 分片拼接；</li>
  *   <li>没有 {@code data: [DONE]} 结束标记，靠连接关闭表示结束，因此
  *       {@link #finish()} 才是发出 {@code onComplete} 的地方；</li>
- *   <li>{@code usageMetadata} 只在末尾分片（或每个分片累计）出现。</li>
+ *   <li>{@code usageMetadata} 是<b>累计口径</b>（官方逐帧发送"截至当前的累计值"），
+ *       因此本类会把它换算成增量再回调（详见 {@link #readUsage}）。</li>
  * </ul>
  *
- * <p>工具调用 id 与 {@link GeminiCodec} 使用同一套合成规则（{@code call_<n>}），
+ * <p>工具调用 id 与 {@link GeminiCodec} 使用同一套合成规则（{@code call_<名字>_<序号>}），
  * 序号跨分片递增，保证流式与非流式两条路径下 id 语义一致、{@code tool_result} 能对上。</p>
  */
 public final class GeminiStreamDecoder implements StreamDecoder {
@@ -56,6 +57,8 @@ public final class GeminiStreamDecoder implements StreamDecoder {
 
     private FinishReason finishReason = FinishReason.UNKNOWN;
     private Usage usage = Usage.ZERO;
+    /** 已经按增量口径上报过的累计用量，用于把逐帧的累计值换算成差值。 */
+    private Usage reportedUsage = Usage.ZERO;
     private String responseId;
     private String modelVersion;
 
@@ -215,7 +218,8 @@ public final class GeminiStreamDecoder implements StreamDecoder {
                 String argumentsJson = args == null || args.isNull() ? "{}" : Json.write(args);
                 // Gemini 流式下 functionCall 一次性给全（不像 OpenAI 需要按 index 拼 arguments 分片），
                 // 收到即回调；id 由本心按出现顺序合成，序号跨分片递增，保证与 tool_result 的对应稳定。
-                ToolUsePart toolUse = new ToolUsePart(GeminiCodec.synthesizeToolCallId(toolCallSequence),
+                ToolUsePart toolUse = new ToolUsePart(
+                        GeminiCodec.synthesizeToolCallId(functionCall.path("name").asText(""), toolCallSequence),
                         functionCall.path("name").asText(""), argumentsJson);
                 toolUses.add(toolUse);
                 handler.onToolCall(toolUse);
@@ -228,8 +232,21 @@ public final class GeminiStreamDecoder implements StreamDecoder {
         if (usageMetadata == null || !usageMetadata.isObject()) {
             return;
         }
-        // Gemini 的 usageMetadata 是累计值：直接以最后出现的分片为准
-        usage = GeminiCodec.decodeUsage(usageMetadata);
-        handler.onUsage(usage);
+        // Gemini 的 usageMetadata 是【累计口径】：官方逐帧发送"截至当前的累计值"，
+        // 于是两帧 (10,2) → (10,5) 的真实用量就是 (10,5)，而不是 (20,7)。
+        // 上层（StreamCollector / LoopContext）对标量用量做的是【累加】，因此这里必须
+        // 与 AnthropicStreamDecoder 一样把累计值换算成增量再回调 —— 否则帧数越多数字越大，
+        // 用量的偏差会直接体现在账单与配额上，而且不报错、不影响功能，最难被发现。
+        Usage cumulative = GeminiCodec.decodeUsage(usageMetadata);
+        int inputDelta = Math.max(0, cumulative.inputTokens() - reportedUsage.inputTokens());
+        int outputDelta = Math.max(0, cumulative.outputTokens() - reportedUsage.outputTokens());
+        int cachedDelta = Math.max(0, cumulative.cachedInputTokens() - reportedUsage.cachedInputTokens());
+        int reasoningDelta = Math.max(0, cumulative.reasoningTokens() - reportedUsage.reasoningTokens());
+        reportedUsage = cumulative;
+        // 收尾的 ChatResponse 用最后一份累计值（与非流式路径 decodeUsage 的口径一致）
+        usage = cumulative;
+        if (inputDelta > 0 || outputDelta > 0 || cachedDelta > 0 || reasoningDelta > 0) {
+            handler.onUsage(new Usage(inputDelta, outputDelta, cachedDelta, reasoningDelta));
+        }
     }
 }

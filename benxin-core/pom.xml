@@ -21,6 +21,15 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
         <!--
+          工具参数与返回值里的 Optional<T> 靠它才能绑定。README 承诺"参数支持 Optional"，
+          而 core 是纯 Java 模块，不能指望宿主的 Spring Boot 恰好把它带上 classpath，
+          因此这里显式声明（Json 门面会通过 findAndRegisterModules() 自动发现它）。
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jdk8</artifactId>
+        </dependency>
+        <!--
           可选：仅"声明式工作流"的 YAML 入口需要它。
           core 里所有 YAML 调用都走反射（见 workflow/YamlSupport），因此没引这个依赖时
           依然能编译、能跑，只是 YAML 入口报一句明确的"请改用 JSON 或引入 snakeyaml"。

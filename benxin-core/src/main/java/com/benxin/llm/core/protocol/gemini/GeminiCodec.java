@@ -290,8 +290,8 @@ public class GeminiCodec implements ProtocolCodec {
         functionCall.put("name", toolUse.name() == null ? "" : toolUse.name());
         functionCall.set("args", parseArguments(toolUse.argumentsJson()));
         // Gemini 的 functionCall 没有 id 字段，本心的 ToolUsePart.id 在请求体里没有落点。
-        // 这里仍按 "名字+序号" 合成一个稳定 id 仅用于日志追踪；它同时也是名字缺失时的
-        // 还原线索（见 toolNameOf）。回灌时真正起作用的是 name。
+        // 这里仍按统一约定合成一个稳定 id 仅用于日志追踪；它同时也是名字缺失时的还原线索
+        // （见 toolNameOf）。回灌时真正起作用的是 name。
         if (log.isDebugEnabled()) {
             log.debug("Gemini 编码：functionCall {} 使用合成 id {}", functionCall.get("name").asText(),
                     synthesizeToolCallId(toolUse.name(), sequence));
@@ -337,37 +337,51 @@ public class GeminiCodec implements ProtocolCodec {
         if (name != null && !name.isBlank()) {
             return name;
         }
-        String id = toolResult.toolUseId();
-        if (id != null && !id.isBlank()) {
-            String value = id.trim();
-            // 解码阶段合成的 call_<n> 不含名字，无法还原；编码阶段合成的 <名字>_<序号> 可以。
-            if (!value.matches(SYNTHETIC_CALL_PREFIX + "\\d+")) {
-                int idx = value.lastIndexOf('_');
-                if (idx > 0 && idx < value.length() - 1
-                        && value.substring(idx + 1).chars().allMatch(Character::isDigit)) {
-                    return value.substring(0, idx);
-                }
-                return value;
-            }
+        String restored = restoreNameFromId(toolResult.toolUseId());
+        if (restored != null) {
+            return restored;
         }
-        log.warn("Gemini 编码：工具结果既没有名字也没有可还原的 id，functionResponse.name 退化为 unknown");
+        log.warn("Gemini 编码：工具结果既没有名字也没有可还原的 id（{}），functionResponse.name 退化为 unknown",
+                toolResult.toolUseId());
         return "unknown";
     }
 
-    /** 编码阶段使用的"名字+序号"稳定 id（仅用于日志与名字还原，不进入请求体）。 */
-    private static String synthesizeToolCallId(String name, int sequence) {
-        String prefix = name == null || name.isBlank() ? "tool" : name;
-        return prefix + "_" + sequence;
+    /**
+     * 从合成 id 里还原工具名。
+     *
+     * <p>能还原的形态是 {@code call_<名字>_<序号>}（解码阶段合成）与 {@code <名字>_<序号>}
+     * （历史形态）。<b>只有</b> {@code call_<序号>} 这种不含名字的旧式 id 还原不出来 ——
+     * 那属于"没有信息"，返回 {@code null} 让调用方报 unknown，而不是把 id 当成名字发出去。</p>
+     */
+    static String restoreNameFromId(String id) {
+        if (id == null || id.isBlank()) {
+            return null;
+        }
+        String value = id.trim();
+        String candidate = value.startsWith(SYNTHETIC_CALL_PREFIX)
+                ? value.substring(SYNTHETIC_CALL_PREFIX.length())
+                : value;
+        int idx = candidate.lastIndexOf('_');
+        if (idx > 0 && idx < candidate.length() - 1
+                && candidate.substring(idx + 1).chars().allMatch(Character::isDigit)) {
+            return candidate.substring(0, idx);
+        }
+        return null;
     }
 
     /**
-     * 解码阶段合成工具调用 id：Gemini 的 {@code functionCall} 没有 id，而
-     * {@link ToolUsePart#id()} 需要一个稳定值用于回调与去重，故按出现顺序合成
-     * {@code call_<n>}（从 1 开始）。流式解码器复用同一方法，保证同一个调用在
-     * 流式/非流式两条路径上拿到同样的 id。
+     * 合成工具调用 id，<b>编解码两侧共用同一套约定</b>。
+     *
+     * <p>以前两侧各写一套：编码阶段用 {@code <名字>_<序号>}（只进日志），解码阶段用
+     * {@code call_<序号>}（真正下发到运行时）。于是 {@link #toolNameOf} 里"从合成 id 还原名字"
+     * 的分支永远命不中解码产生的 id —— 一段看起来在兜底、实际是死代码的逻辑。</p>
+     *
+     * <p>统一成 {@code call_<名字>_<序号>} 之后，"只带 id、不带工具名"的结果回灌也能对上位；
+     * 名字为空时退化为 {@code call_<序号>}。</p>
      */
-    static String synthesizeToolCallId(int sequence) {
-        return SYNTHETIC_CALL_PREFIX + sequence;
+    static String synthesizeToolCallId(String name, int sequence) {
+        String prefix = name == null || name.isBlank() ? "" : name.trim() + "_";
+        return SYNTHETIC_CALL_PREFIX + prefix + sequence;
     }
 
     // ------------------------------------------------------------------ tools
@@ -610,7 +624,9 @@ public class GeminiCodec implements ProtocolCodec {
                 JsonNode args = functionCall.get("args");
                 // args 是对象，反向序列化成本心的 argumentsJson 文本
                 String argumentsJson = args == null || args.isNull() ? "{}" : Json.write(args);
-                parts.add(new ToolUsePart(synthesizeToolCallId(callSequence),
+                // 合成 id 带上工具名（call_<名字>_<序号>）：Gemini 的 functionCall 没有 id，
+                // 而不带名字的 id 在回灌"只带 id 的结果"时无法对位（见 toolNameOf / restoreNameFromId）。
+                parts.add(new ToolUsePart(synthesizeToolCallId(functionCall.path("name").asText(""), callSequence),
                         functionCall.path("name").asText(""), argumentsJson));
             }
         }

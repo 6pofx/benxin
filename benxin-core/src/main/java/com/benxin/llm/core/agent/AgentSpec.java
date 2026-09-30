@@ -151,10 +151,21 @@ public final class AgentSpec {
             return this;
         }
 
+        /**
+         * 设置步数预算。
+         *
+         * <p>{@code <= 0} 一律报错而不是静默回落默认值：以前的写法（{@code if (maxSteps > 0)}）
+         * 会让 {@code maxSteps(0)} 既不生效也不报错，"零预算"这种表达被悄悄换成 24 步，
+         * 是本类里最容易骗过审查的一处。</p>
+         *
+         * @throws IllegalArgumentException 当 {@code maxSteps <= 0}
+         */
         public Builder maxSteps(int maxSteps) {
-            if (maxSteps > 0) {
-                this.maxSteps = maxSteps;
+            if (maxSteps <= 0) {
+                throw new IllegalArgumentException("maxSteps 必须为正数，当前为 " + maxSteps
+                        + "；若想表达\"零步预算\"，请至少在装配前显式决定它的语义，不要依赖静默回落");
             }
+            this.maxSteps = maxSteps;
             return this;
         }
 

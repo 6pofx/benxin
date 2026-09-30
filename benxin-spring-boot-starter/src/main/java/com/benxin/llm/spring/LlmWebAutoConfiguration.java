@@ -18,9 +18,11 @@ import org.springframework.web.servlet.DispatcherServlet;
  */
 @AutoConfiguration(after = LlmAgentAutoConfiguration.class)
 @ConditionalOnClass(DispatcherServlet.class)
-// 依赖 AgentRegistry 而不是再叠一个 @ConditionalOnProperty —— 后者不可重复，
-// 而且"依赖的 bean 在不在"本来就是比配置项更准确的判断依据。
-@ConditionalOnBean(AgentRegistry.class)
+// 三个构造依赖全部纳入守卫。以前只守了 AgentRegistry，于是"容器里另有其人提供 AgentRegistry"
+// 而 llm.enabled=false 把 ModelRegistry / LoopRegistry 关掉时，守卫放行、依赖不全，
+// 失败方式是【整个应用起不来】（UnsatisfiedDependency），而不是"端点不暴露"。
+// 插件把"定义一个同类型 bean 就完成替换"写成正式扩展点，所以这个组合并非空想。
+@ConditionalOnBean({AgentRegistry.class, ModelRegistry.class, LoopRegistry.class})
 @ConditionalOnProperty(prefix = "llm.web", name = "enabled", havingValue = "true")
 public class LlmWebAutoConfiguration {
 

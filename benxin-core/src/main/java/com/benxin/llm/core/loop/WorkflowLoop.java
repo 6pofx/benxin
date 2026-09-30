@@ -140,6 +140,13 @@ public class WorkflowLoop extends AbstractAgentLoop {
         attributes.put(RUN_ATTRIBUTE, run);
         attributes.put(VARIABLES_ATTRIBUTE, state.snapshot());
 
+        if (run.truncated()) {
+            // 与其它 Loop 保持同一口径：预算耗尽时 AgentResult.maxStepsReached() 必须为 true。
+            // 以前只有工作流漏了这一步，于是"按 maxStepsReached() 统一判断输出是不是半成品"
+            // 会在工作流场景静默漏判。
+            markMaxStepsReached(ctx);
+        }
+
         log.debug("[workflow:{}] 执行结束，{} 次节点执行，路径 {}",
                 resolved.name(), run.executions(), run.visited());
 

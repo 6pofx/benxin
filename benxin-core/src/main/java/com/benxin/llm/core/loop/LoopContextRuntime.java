@@ -5,6 +5,7 @@ import com.benxin.llm.core.message.ChatMessage;
 import com.benxin.llm.core.message.Role;
 import com.benxin.llm.core.message.ToolUsePart;
 import com.benxin.llm.core.tool.ToolCallback;
+import com.benxin.llm.core.tool.ToolResult;
 import com.benxin.llm.core.workflow.WorkflowNode;
 import com.benxin.llm.core.workflow.WorkflowRuntime;
 
@@ -78,7 +79,15 @@ public final class LoopContextRuntime implements WorkflowRuntime {
 
     @Override
     public String callTool(String tool, Map<String, Object> args, WorkflowNode node) {
-        return ctx.callTool(tool, args).content();
+        ToolResult result = ctx.callTool(tool, args);
+        if (result.error()) {
+            // 工具失败（未知工具名 / 被沙箱拒绝 / 工具抛异常 / 超时）必须升级成"节点级失败"，
+            // 否则 tool 节点的 retry 与 continueOnError 永远没有东西可接 ——
+            // 一个写错工具名的节点会把 "未知工具 […]" 当成正常输出静默地流到下游，
+            // 直到最终答案很奇怪才被发现。
+            throw new IllegalStateException(result.content());
+        }
+        return result.content();
     }
 
     @Override

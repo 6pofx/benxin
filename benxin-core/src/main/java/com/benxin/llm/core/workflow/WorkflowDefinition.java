@@ -2,6 +2,8 @@ package com.benxin.llm.core.workflow;
 
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonPOJOBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,6 +31,8 @@ import java.util.Set;
  */
 @JsonDeserialize(builder = WorkflowDefinition.Builder.class)
 public final class WorkflowDefinition {
+
+    private static final Logger log = LoggerFactory.getLogger(WorkflowDefinition.class);
 
     /** 单节点默认访问上限，用来给"不调模型的死循环"（branch ↔ set）兜底。 */
     public static final int DEFAULT_MAX_VISITS = 100;
@@ -194,6 +198,40 @@ public final class WorkflowDefinition {
         }
         if (maxVisitsPerNode <= 0) {
             throw new IllegalArgumentException("工作流 [" + name + "] 的 maxVisitsPerNode 必须为正数");
+        }
+        warnUnreachableEdges();
+    }
+
+    /**
+     * 加载期可达性提示：无条件的出边之后，所有条件出边都是死边。
+     *
+     * <p>引擎按声明顺序取第一条条件成立的边走，因此"默认边放最后"是唯一需要记住的规则 ——
+     * 而这条规则最容易违反，后果又最难在运行时发现：图能跑完、结果看着像样，
+     * 只是某个分支从来没被走过。本类对"节点引用不存在""条件语法错误""location 与 inline 同时配置"
+     * 这类静态错误都会在加载期直接让启动失败，唯独"不可达的边"以前没有任何防线；
+     * 这里给出警告（而不是抛异常）——因为把默认边写在前面的图在语义上仍然是确定的，
+     * 只是与作者的本意多半不符。</p>
+     */
+    private void warnUnreachableEdges() {
+        for (WorkflowNode node : nodes) {
+            List<WorkflowEdge> out = outgoing(node.id());
+            int defaultIndex = -1;
+            for (int i = 0; i < out.size(); i++) {
+                if (out.get(i).unconditional()) {
+                    defaultIndex = i;
+                    break;
+                }
+            }
+            if (defaultIndex < 0) {
+                continue;
+            }
+            for (int i = defaultIndex + 1; i < out.size(); i++) {
+                WorkflowEdge dead = out.get(i);
+                log.warn("[workflow:{}] 节点 [{}] 的第 {} 条出边 {} 永远不可达："
+                                + "它前面第 {} 条是不带 when 的默认边（边序即优先级）。"
+                                + "若非本意，请把默认边移到所有条件边之后",
+                        name, node.id(), i + 1, dead, defaultIndex + 1);
+            }
         }
     }
 

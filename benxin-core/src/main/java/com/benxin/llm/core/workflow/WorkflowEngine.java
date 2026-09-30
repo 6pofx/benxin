@@ -60,15 +60,18 @@ public final class WorkflowEngine {
                 "nodes", definition.nodes().size()));
 
         while (node != null) {
-            int seen = visits.merge(node.id(), 1, Integer::sum);
-            if (seen > definition.maxVisitsPerNode()) {
+            int already = visits.getOrDefault(node.id(), 0);
+            if (already >= definition.maxVisitsPerNode()) {
+                // 先判护栏再计数：否则事件里的 visits 会比访问表多一次，两处口径对不上，
+                // 排查"到底转了几圈"时反而要多绕一层。
                 runtime.emit("workflow.loop-guard", event("workflow", definition.name(), "node", node.id(),
-                        "visits", seen));
+                        "visits", already));
                 throw new WorkflowException(definition.name(), node.id(),
-                        "节点 [" + node.id() + "] 已被访问 " + seen + " 次，超过上限 "
+                        "节点 [" + node.id() + "] 已被访问 " + already + " 次，已达上限 "
                                 + definition.maxVisitsPerNode() + "，判定为死循环。"
                                 + "请检查出边条件是否存在永远成立的环，或调大 maxVisitsPerNode。");
             }
+            int seen = visits.merge(node.id(), 1, Integer::sum);
             if (runtime.outOfBudget()) {
                 log.debug("[workflow:{}] 步数预算耗尽，停在节点 [{}]", definition.name(), node.id());
                 runtime.emit("workflow.truncated", event("workflow", definition.name(), "node", node.id(),
@@ -79,7 +82,22 @@ public final class WorkflowEngine {
 
             visited.add(node.id());
             executions++;
-            Outcome outcome = execute(definition, node, state, runtime);
+            Outcome outcome;
+            try {
+                outcome = execute(definition, node, state, runtime);
+            } catch (RuntimeException e) {
+                // 硬失败的节点同样要进轨迹：审计一份"失败了"的运行，最需要的恰恰是
+                // "它试图走哪里"。以前 workflow.node 只在执行成功之后广播，于是轨迹
+                // 只能证明"走过哪些成功的节点"，失败节点只剩事件表里的一个名字。
+                runtime.emit("workflow.node", event(
+                        "workflow", definition.name(),
+                        "node", node.id(),
+                        "type", node.type().wireName(),
+                        "executions", executions,
+                        "failed", true,
+                        "output", null));
+                throw e;
+            }
             if (!outcome.failureSwallowed()) {
                 // 节点成功了才清空失败原因。刻意不在节点开始前清 ——
                 // 否则补偿分支刚读到 ${error}，"下一节点启动"就把它擦掉，

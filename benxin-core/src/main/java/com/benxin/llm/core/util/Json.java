@@ -23,6 +23,10 @@ public final class Json {
         ObjectMapper m = new ObjectMapper();
         m.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         m.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+        // 必须自动发现 classpath 上的模块：工具参数里写 Optional<T>（以及 java.time.* 等
+        // 常见类型）时，靠的就是 jackson-datatype-jdk8 / jsr310。少了这一步，
+        // "schema 能生成、值却绑不进去"会变成一个只有运行时才暴露的静默缺陷。
+        m.findAndRegisterModules();
         return m;
     }
 

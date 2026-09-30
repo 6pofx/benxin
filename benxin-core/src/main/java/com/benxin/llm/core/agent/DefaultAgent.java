@@ -59,6 +59,7 @@ public class DefaultAgent implements Agent {
     private final ExecutorService toolExecutor;
     private final ModelRegistry modelRegistry;
     private final LoopRegistry loopRegistry;
+    private final int hardMaxSteps;
 
     DefaultAgent(AgentBuilder b, AgentListener listener) {
         this.modelRegistry = b.modelRegistry == null ? new ModelRegistry() : b.modelRegistry;
@@ -98,6 +99,7 @@ public class DefaultAgent implements Agent {
         this.approvalPolicy = b.approvalPolicy;
         this.subAgents = new LinkedHashMap<>(b.subAgents);
         this.toolExecutor = b.toolExecutor == null ? SHARED_TOOL_EXECUTOR : b.toolExecutor;
+        this.hardMaxSteps = b.hardMaxSteps;
     }
 
     // ---------- 基本访问 ----------
@@ -336,6 +338,7 @@ public class DefaultAgent implements Agent {
                 .sandbox(sandbox)
                 .approvalHandler(approvalHandler)
                 .approvalPolicy(approvalPolicy)
+                .hardMaxSteps(hardMaxSteps)
                 .toolExecutor(toolExecutor);
         interceptors.forEach(b::interceptor);
         subAgents.forEach(b::subAgent);

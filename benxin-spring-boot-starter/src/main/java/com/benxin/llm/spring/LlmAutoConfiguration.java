@@ -133,12 +133,13 @@ public class LlmAutoConfiguration {
         if (configured != null) {
             // 无论默认模型来自配置还是来自 bean，都在这里统一落地
             registry.setDefault(configured);
-        } else if (registry.defaultName() == null && !beanModels.isEmpty()) {
+        } else if (registry.configuredDefaultName() == null && !beanModels.isEmpty()) {
             registry.setDefault(beanModels.get(0));
         }
-        if (registry.defaultName() != null && !registry.names().contains(registry.defaultName())) {
+        if (registry.configuredDefaultName() != null
+                && !registry.names().contains(registry.configuredDefaultName())) {
             log.warn("[benxin] llm.default-model=[{}] 未匹配到任何已注册模型 {}，将回退到第一个可用模型",
-                    registry.defaultName(), registry.names());
+                    registry.configuredDefaultName(), registry.names());
         }
         log.info("[benxin] 已注册模型 {}（默认 {}）", registry.names(), registry.defaultName());
         return registry;
@@ -275,24 +276,55 @@ public class LlmAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ToolSandbox llmToolSandbox(LlmProperties properties) {
-        if (!properties.getTools().isBuiltinEnabled()) {
-            // 内置工具未开启时，沙箱不应干扰用户自己写的工具
-            return ToolSandbox.permissive();
-        }
+        // 沙箱与"启用了哪些内置工具"同源：BuiltinToolkit 会按实际装配的工具集推导授权
+        // （enable("write") 等价于 allowWrite(true)），以前这里只看 builtin-enabled 与
+        // allow-write，于是 enabled:[write] 而没写 allow-write 时工具"看得见却跑不动"。
         return BuiltinToolkit.sandbox(LlmBuiltinToolRegistrar.toSandboxConfig(properties.getTools()));
     }
 
+    /**
+     * 内置事件监听器。
+     *
+     * <p>条件按<b>类型</b>判断，与其它 13 个切面保持同一套替换机制：
+     * 使用者定义任意一个 {@code AgentListener} bean，内置这个就让位。
+     * 以前写的是 {@code @ConditionalOnMissingBean(name = "llmLoggingListener")} ——
+     * 按 bean 名字判，于是自定义监听器会被"并存"而不是"顶掉"，
+     * 与 README 承诺的统一机制不一致。</p>
+     */
     @Bean
-    @ConditionalOnMissingBean(name = "llmLoggingListener")
+    @ConditionalOnMissingBean(AgentListener.class)
     public AgentListener llmLoggingListener(LlmProperties properties) {
         return properties.getAgent().isLoggingListener()
                 ? new LoggingListener()
                 : AgentListener.noop();
     }
 
+    /**
+     * 拦截器链：这里是 {@code @LlmGuard(agents = {...})} 的范围包装发生的地方。
+     *
+     * <p>返回的 {@code List<AgentInterceptor>} 仍然保留为 bean（外部可以按名字取到它做诊断），
+     * 但消费端请依赖 {@link LlmInterceptorChain} —— {@code ObjectProvider<AgentInterceptor>}
+     * 取到的是容器里<b>未包装</b>的原始 bean，会让 {@code @LlmGuard} 的范围声明彻底失效。</p>
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "llmInterceptors")
+    public List<AgentInterceptor> llmInterceptors(ObjectProvider<AgentInterceptor> interceptors) {
+        return resolveInterceptors(interceptors);
+    }
+
     @Bean
     @ConditionalOnMissingBean
-    public List<AgentInterceptor> llmInterceptors(ObjectProvider<AgentInterceptor> interceptors) {
+    public LlmInterceptorChain llmInterceptorChain(ObjectProvider<AgentInterceptor> interceptors,
+                                                   ObjectProvider<List<AgentInterceptor>> resolved) {
+        List<AgentInterceptor> chain = resolved.orderedStream().findFirst().orElse(null);
+        if (chain == null) {
+            chain = resolveInterceptors(interceptors);
+        }
+        return new LlmInterceptorChain(chain);
+    }
+
+    /** 把带 {@code @LlmGuard} 的拦截器包成按 Agent 名过滤的 {@link SelectiveInterceptor} 并按 order 排序。 */
+    private static List<AgentInterceptor> resolveInterceptors(ObjectProvider<AgentInterceptor> interceptors) {
         List<AgentInterceptor> resolved = new ArrayList<>();
         interceptors.orderedStream().forEach(interceptor -> {
             LlmGuard guard = AopUtils.getTargetClass(interceptor).getAnnotation(LlmGuard.class);

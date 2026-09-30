@@ -127,9 +127,14 @@ public class RetryingLlmModel implements LlmModel {
         if (handler == null) {
             throw new IllegalArgumentException("流式回调 handler 不能为 null");
         }
+        // onStart 必须"恰好一次"，而重试会把 delegate.stream() 整个再跑一遍，
+        // 内置的 HttpLlmModel 每次都会新建自己的 StartGuard —— 于是订阅方收到第二次 onStart，
+        // 把 onStart 当"初始化 UI / 清空缓冲 / 开始计时"信号的一侧会被重置一次。
+        // 装饰器是唯一能跨越多次尝试的地方，所以在这里收口。
+        LlmStreamHandler onceStarted = new OnceStarted(handler);
         for (int attempt = 0; ; attempt++) {
             // 每次尝试都换一个新的探针：emitted/error 只对"本次尝试"有意义
-            StreamProbe probe = new StreamProbe(handler);
+            StreamProbe probe = new StreamProbe(onceStarted);
             Throwable failure;
             try {
                 delegate.stream(request, probe);
@@ -252,6 +257,60 @@ public class RetryingLlmModel implements LlmModel {
     /** 只认 {@link ModelException} 自带的语义；其它异常（编码器 bug、handler 抛错）不盲目重试。 */
     private static boolean isRetryable(Throwable failure) {
         return failure instanceof ModelException modelException && modelException.isRetryable();
+    }
+
+    /**
+     * 只放行第一次 {@code onStart} 的包装。
+     *
+     * <p>重试期间下游可能被重新初始化，而"流要开始了"这件事在一次 {@code stream()} 调用里
+     * 只发生一次；其余回调原样透传。</p>
+     */
+    private static final class OnceStarted implements LlmStreamHandler {
+
+        private final LlmStreamHandler downstream;
+        private boolean started;
+
+        private OnceStarted(LlmStreamHandler downstream) {
+            this.downstream = downstream;
+        }
+
+        @Override
+        public void onStart() {
+            if (!started) {
+                started = true;
+                downstream.onStart();
+            }
+        }
+
+        @Override
+        public void onTextDelta(String delta) {
+            downstream.onTextDelta(delta);
+        }
+
+        @Override
+        public void onThinkingDelta(String delta) {
+            downstream.onThinkingDelta(delta);
+        }
+
+        @Override
+        public void onToolCall(ToolUsePart toolUse) {
+            downstream.onToolCall(toolUse);
+        }
+
+        @Override
+        public void onUsage(Usage usage) {
+            downstream.onUsage(usage);
+        }
+
+        @Override
+        public void onComplete(ChatResponse response) {
+            downstream.onComplete(response);
+        }
+
+        @Override
+        public void onError(Throwable cause) {
+            downstream.onError(cause);
+        }
     }
 
     /**

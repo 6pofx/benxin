@@ -24,6 +24,7 @@ import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -48,7 +49,7 @@ public class LlmAgentFactory implements BeanFactoryAware {
     private final ToolSandbox sandbox;
     private final ApprovalHandler approvalHandler;
     private final AgentRegistry agentRegistry;
-    private final ObjectProvider<AgentInterceptor> interceptorProvider;
+    private final ObjectProvider<LlmInterceptorChain> interceptorChainProvider;
     private final ObjectProvider<AgentListener> listenerProvider;
 
     private BeanFactory beanFactory;
@@ -63,7 +64,7 @@ public class LlmAgentFactory implements BeanFactoryAware {
                            ToolSandbox sandbox,
                            ApprovalHandler approvalHandler,
                            AgentRegistry agentRegistry,
-                           ObjectProvider<AgentInterceptor> interceptorProvider,
+                           ObjectProvider<LlmInterceptorChain> interceptorChainProvider,
                            ObjectProvider<AgentListener> listenerProvider) {
         this.properties = properties;
         this.modelRegistry = modelRegistry;
@@ -75,7 +76,7 @@ public class LlmAgentFactory implements BeanFactoryAware {
         this.sandbox = sandbox;
         this.approvalHandler = approvalHandler;
         this.agentRegistry = agentRegistry;
-        this.interceptorProvider = interceptorProvider;
+        this.interceptorChainProvider = interceptorChainProvider;
         this.listenerProvider = listenerProvider;
     }
 
@@ -133,18 +134,33 @@ public class LlmAgentFactory implements BeanFactoryAware {
     public Agent createFromInterface(Class<?> agentInterface) {
         LlmAgent annotation = agentInterface.getAnnotation(LlmAgent.class);
         AgentSpec spec = specOf(agentInterface);
-        return create(spec, resolveTools(annotation, spec.name()));
+        return create(spec, resolveTools(annotation, spec.name()), annotationInterceptors(annotation));
     }
 
     /** 用一个现成的 {@link AgentSpec} 构建 Agent（工具取全局工具集）。 */
     public Agent create(AgentSpec spec) {
-        return create(spec, toolCatalog.global());
+        return create(spec, toolCatalog.global(), List.of());
     }
 
     /** 完整装配。 */
     public Agent create(AgentSpec spec, ToolRegistry tools) {
+        return create(spec, tools, List.of());
+    }
+
+    /**
+     * 完整装配（含注解上追加的拦截器）。
+     *
+     * @param extraInterceptors {@code @LlmAgent(interceptors = {...})} 实例化出来的拦截器
+     */
+    public Agent create(AgentSpec spec, ToolRegistry tools, List<AgentInterceptor> extraInterceptors) {
         LlmProperties.AgentProperties defaults = properties.getAgent();
-        int maxSteps = Math.min(Math.max(1, spec.maxSteps()), Math.max(1, defaults.getHardMaxSteps()));
+        int maxSteps = Math.max(1, spec.maxSteps());
+
+        List<AgentInterceptor> interceptors = new ArrayList<>(interceptorChain());
+        if (extraInterceptors != null) {
+            interceptors.addAll(extraInterceptors);
+        }
+        interceptors.sort(Comparator.comparingInt(AgentInterceptor::order));
 
         AgentBuilder builder = Agent.builder(spec.name())
                 .spec(spec.toBuilder().maxSteps(maxSteps).build())
@@ -157,7 +173,8 @@ public class LlmAgentFactory implements BeanFactoryAware {
                 .sandbox(sandbox)
                 .approvalHandler(approvalHandler)
                 .approvalPolicy(ApprovalPolicy.from(defaults.getApprovalPolicy()))
-                .interceptors(interceptorProvider.orderedStream().toList())
+                .hardMaxSteps(defaults.getHardMaxSteps())
+                .interceptors(interceptors)
                 .listeners(listenerProvider.orderedStream().toList());
 
         if (spec.model() != null) {
@@ -174,8 +191,39 @@ public class LlmAgentFactory implements BeanFactoryAware {
 
         Agent agent = builder.build();
         log.info("[benxin] 装配 Agent [{}]：loop={}，model={}，工具={}，最大步数={}",
-                agent.name(), agent.loop().name(), agent.model().name(), agent.tools().names(), maxSteps);
+                agent.name(), agent.loop().name(), agent.model().name(), agent.tools().names(),
+                agent.spec().maxSteps());
         return agent;
+    }
+
+    /**
+     * 取"已被 {@code @LlmGuard} 包装过"的拦截器链。
+     *
+     * <p>必须依赖 {@link LlmInterceptorChain} 而不是 {@code ObjectProvider<AgentInterceptor>}：
+     * 后者的解析目标是"类型为 AgentInterceptor 的 bean"，会绕开
+     * {@code LlmAutoConfiguration.llmInterceptors()} 返回的那份包装清单，
+     * 于是 {@code @LlmGuard(agents = {...})} 声明的范围完全失效。</p>
+     */
+    private List<AgentInterceptor> interceptorChain() {
+        LlmInterceptorChain chain = interceptorChainProvider.getIfAvailable();
+        return chain == null ? List.of() : chain.interceptors();
+    }
+
+    /**
+     * 实例化 {@code @LlmAgent(interceptors = {...})} 里声明的拦截器。
+     *
+     * <p>以前这个注解属性彻底空转：{@code specOf()} 不读它，{@code instantiateInterceptor()}
+     * 在整个插件里没有任何调用点 —— 写了等于没写，而且不报错、不警告。</p>
+     */
+    private List<AgentInterceptor> annotationInterceptors(LlmAgent annotation) {
+        if (annotation == null || annotation.interceptors().length == 0) {
+            return List.of();
+        }
+        List<AgentInterceptor> result = new ArrayList<>();
+        for (Class<?> type : annotation.interceptors()) {
+            result.add(instantiateInterceptor(type));
+        }
+        return result;
     }
 
     /** 工具解析：注解里显式列出的类/名字优先；两者都为空时使用全局工具表。 */

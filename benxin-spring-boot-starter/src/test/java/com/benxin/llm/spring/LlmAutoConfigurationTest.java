@@ -8,6 +8,7 @@ import com.benxin.llm.core.memory.MemoryStore;
 import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.model.ModelRegistry;
 import com.benxin.llm.core.prompt.SystemPromptProvider;
+import com.benxin.llm.core.sandbox.CompositeSandbox;
 import com.benxin.llm.core.sandbox.ToolSandbox;
 import com.benxin.llm.core.tool.ToolCallback;
 import com.benxin.llm.spring.fixture.FixtureTools;
@@ -120,10 +121,15 @@ class LlmAutoConfigurationTest {
     }
 
     @Test
-    @DisplayName("内置工具默认关闭；打开后才注册，并且沙箱不再是宽松实现")
+    @DisplayName("内置工具默认关闭；但沙箱始终是真正的围栏实现（不再随内置开关退化为 permissive）")
     void builtinToolsAreOptIn() {
-        runner.run(context -> assertThat(context.getBean(ToolSandbox.class))
-                .isSameAs(ToolSandbox.permissive()));
+        // 内置工具没开时，沙箱也必须守住围栏：使用者自己写的读文件工具同样要受约束。
+        // 以前这里返回 ToolSandbox.permissive()，等于默认配置下根本没有沙箱。
+        runner.run(context -> {
+            ToolSandbox sandbox = context.getBean(ToolSandbox.class);
+            assertThat(sandbox).isNotSameAs(ToolSandbox.permissive());
+            assertThat(sandbox).isInstanceOf(CompositeSandbox.class);
+        });
 
         runner.withPropertyValues(
                         "llm.tools.builtin-enabled=true",
@@ -134,8 +140,7 @@ class LlmAutoConfigurationTest {
                     LlmToolCatalog catalog = context.getBean(LlmToolCatalog.class);
                     assertThat(catalog.global().names())
                             .contains("read", "write", "edit", "glob", "grep");
-                    // 打开内置工具后沙箱必须换成真正的围栏实现
-                    assertThat(context.getBean(ToolSandbox.class)).isNotSameAs(ToolSandbox.permissive());
+                    assertThat(context.getBean(ToolSandbox.class)).isInstanceOf(CompositeSandbox.class);
                 });
     }
 

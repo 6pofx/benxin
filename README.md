@@ -40,7 +40,7 @@ public interface WeatherAssistant {
 | 切面 | 接口 | 内置实现 | 怎么换掉 |
 |---|---|---|---|
 | 模型 | `LlmModel` | `OpenAiModel` / `AnthropicModel` / `GeminiModel` | 定义 `LlmModel` bean，或写 `llm.models.*` |
-| 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` | 定义 `ProtocolCodec` bean |
+| 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` | ⚠️ **暂不支持**：`Protocol` 是封闭枚举、starter 也不消费 `ProtocolCodec` bean。见[想加第四种协议？](#想加第四种协议) |
 | 传输 | `HttpTransport` | `JdkHttpTransport`（零依赖） | 定义 `HttpTransport` bean（OkHttp / WebClient / 测试桩） |
 | **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged` | `@LlmLoop("名字")` |
 | **工具** | `ToolCallback` | 反射适配器 + 8 个内置工具 | `@LlmTool` 注解方法 |
@@ -54,8 +54,15 @@ public interface WeatherAssistant {
 | 审批 | `ApprovalHandler` | `autoApprove` / `denyAll` | 定义 bean |
 | 分词估算 | `TokenEstimator` | 中英混排启发式 | 定义 bean（接真实 tokenizer） |
 
-**替换机制统一是**：定义一个同类型 bean。所有 `@Bean` 都带 `@ConditionalOnMissingBean`，
+**替换机制统一是**：定义一个同类型 bean。所有**可替换的组件** `@Bean` 都带 `@ConditionalOnMissingBean`，
 所以你不需要开关、不需要排除自动配置、更不需要 fork。
+
+> 例外只有三个**基础设施** bean，它们带 `static`（必须早于普通 bean 就绪）、刻意不参与替换：
+> `llmToolCatalog`（`@LlmTool` 扫描的 `BeanPostProcessor`）、`llmComponentRegistrar`
+> （`@LlmLoop` / `@LlmGuard` 的注册器）、`llmBuiltinToolRegistrar`
+> （只在 `llm.tools.builtin-enabled=true` 时存在）。
+> 事件监听（`AgentListener`）是**叠加**语义：注册一个同类型 bean 会让内置的
+> `llmLoggingListener` 让位（按类型判断），但多个自定义监听器之间会全部生效。
 
 ---
 
@@ -83,8 +90,22 @@ llm:
       protocol: openai
       base-url: https://api.deepseek.com
       api-key: ${DEEPSEEK_KEY}
-      model: deepseek-chat
+      model: deepseek-chat        # 下发给上游的模型 id（不是上面那个 key）
 ```
+
+`llm.models.<key>.*` 的完整字段与默认值：
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `protocol` | `openai` | 三选一：`openai` / `anthropic` / `gemini` |
+| `base-url` | — | 厂商或网关地址（末尾 `/` 会被去掉） |
+| `api-key` | — | 鉴权用；也会作为各协议默认头的一部分 |
+| `model` | — | **下发给上游的模型 id**。与 `llm.models` 的 key（注册名）是两件事：`@LlmAgent(model = "deepseek")` 用的是 **key**，报文里发出去的是这一行 |
+| `max-retries` | **2** | 瞬时错误（429/5xx/网络中断）的指数退避重试次数。注意默认值不是 0 —— 想数报文或工具调用次数时请显式写 `max-retries: 0`，否则"一次调用 = 一笔请求"不成立 |
+| `temperature` / `max-tokens` | 不发送 | 请求里没显式设置时才用配置值 |
+| `connect-timeout` / `read-timeout` / `stream-read-timeout` | 15s / 5min / 10min | — |
+| `headers` / `extra` | 空 | `extra` 里的键会合并进请求体（配置级作为底，请求级覆盖之） |
+| `primary` / `order` | false / 0 | 未指定 `llm.default-model` 时，用来选出默认模型 |
 
 ### 3. 写一个工具
 
@@ -140,7 +161,31 @@ public class MyService {
 | `@Memory` | 参数 | 参数值作为 sessionId，自动装载/保存会话历史 |
 | `@LlmGuard` | 类 | 声明式注册拦截器，可限定只对某些 Agent 生效（同样无需 `@Component`） |
 | `@LlmRetry` | 方法/类 | 声明重试策略 |
-| `@EnableLlmAgents` | 配置类 | 指定 `@LlmAgent` 扫描范围（不写则从主应用包推断） |
+| `@EnableLlmAgents` | 配置类 | **必写**：开启 `@LlmAgent` 接口扫描；不写 `basePackages` 时从主应用包推断 |
+
+> ⚠️ `@EnableLlmAgents` 是**必须**的。starter 里没有任何自动配置会帮忙扫描 `@LlmAgent` 接口 ——
+> "不写则从主应用包推断"说的是**扫描范围**，而不是"注解可以不写"。
+> 完全不写时，一个接口都不会被注册，注入会直接抛 `NoSuchBeanDefinitionException`。
+> 另外它现在遵守 `llm.enabled=false`：总开关关掉时不会再往容器里留一批
+> "一用就炸"的代理 bean（那类失败会被推迟到第一次调用，最难排查）。
+
+### 声明式装配的分工
+
+`@LlmAgent` 只描述意图，真正生效的是容器里的 bean：
+
+| 注解属性 | 落点 |
+|---|---|
+| `name` / `systemPrompt` / `maxSteps` / `temperature` / `maxTokens` / `memory` | `AgentSpec`，空缺项回落到 `llm.agent.*` |
+| `model` | **模型注册表的 key**（`llm.models.<key>` 或某个 `LlmModel` bean 的名字），不是报文里的模型 id —— 后者由 `llm.models.<key>.model` 决定 |
+| `loop` | `LoopRegistry` 里的名字；未注册时打 WARN 并回退默认 Loop |
+| `tools` / `toolNames` | 显式列出的工具；**两者都留空时继承容器的全局工具表** |
+| `subAgents` | 惰性子代理壳，避免 A ⇄ B 的构建环 |
+| `interceptors` | 追加的拦截器实现类，按 `order()` 升序并入全局拦截器链（优先取容器 bean，取不到则直接实例化） |
+
+`llm.agent.hard-max-steps` 是防呆硬上限，夹取逻辑落在 `AgentBuilder.build()` 这一层。
+声明式（`@LlmAgent`）由 `LlmAgentFactory` 自动传入该上限；
+**程序化 `Agent.builder()` 需要自己调 `.hardMaxSteps(n)`** —— 代码里的 `maxSteps` 被视为显式意图，
+不会被配置静默改小。`maxSteps(0)` 现在会**直接报错**（以前被静默忽略、回落到 24）。
 
 ### 参数与返回值
 
@@ -167,6 +212,9 @@ public interface CodeReviewer {
 支持的返回类型：`String` / `AgentResult`（含步数、用量、工具调用记录）/ `void` /
 `Optional<String>` / `List<ChatMessage>` / `int`（步数）/ `long`（耗时）/ `boolean` /
 **任意 DTO（按 JSON 反序列化）**。
+
+> `Optional<String>` 在"模型什么都没说"（输出为空白）时返回 `Optional.empty()`，
+> 因此 `maybe(...).orElse("兜底")` 能拿到兜底值。
 
 ---
 
@@ -240,21 +288,53 @@ llm:
 ```
 
 处理了：`contents[].parts`、`systemInstruction`、`functionCall` / `functionResponse`、
-**无 tool id 情况下的 id 合成与结果对位**、`generationConfig`、
+**无 tool id 情况下的 id 合成与结果对位**（合成 id 形如 `call_<工具名>_<序号>`，
+因此只带 id 回灌的结果也能对回正确的工具）、`generationConfig`、
 **JSON Schema 清洗**（剔除 Gemini 不接受的 `additionalProperties` 等字段）、
 `thought` 标记与 `usageMetadata`。
+
+两个容易被忽略的口径：
+
+* **思考内容仅解析、不回传。** 响应里 `thought: true` 的文本会被归一成 `ThinkingPart`；
+  但回灌历史时 Gemini 不接受把思考作为输入，因此编码阶段会丢弃 `ThinkingPart`。
+* **`usageMetadata` 是累计口径。** 官方逐帧发送"截至当前的累计值"，本心的流式解码器会把它
+  换算成增量再向上层回调，所以多帧之间的用量是**相加**得到的真实值，而不是被重复计入。
 
 ### 想加第四种协议？
 
 ```java
 @Component
 public class MyBedrockCodec implements ProtocolCodec {
-    @Override public Protocol protocol() { return Protocol.from("bedrock"); }
+    @Override public Protocol protocol() { return Protocol.OPENAI; }   // 见下方说明
     // endpoint / headers / encode / decode / newStreamDecoder
 }
 ```
 
-注册后即可在配置里写 `protocol: bedrock`。**调用方代码一行都不用改。**
+⚠️ **当前的能力边界（与"一切皆可插拔"的总基调相比，这是唯一的例外）：**
+
+* `Protocol` 是**封闭枚举**（只有 `openai` / `anthropic` / `gemini`），
+  `Protocol.from("bedrock")` 会直接抛 `IllegalArgumentException`，
+  配置里写 `protocol: bedrock` 会让应用启动失败并列出可选值；
+* starter **不会消费** `ProtocolCodec` bean：内置装配走的是 `ModelFactory` 的协议分支，
+  不查任何编解码器注册表。
+
+也就是说，**"注册一个 `ProtocolCodec` bean 就能在 yml 里写 `protocol: bedrock`"目前做不到**。
+可行且受支持的写法是**程序化装配**（调用方代码一行都不用改）：
+
+```java
+@Bean
+LlmModel bedrockModel(HttpTransport transport) {
+    ModelConfig config = ModelConfig.builder("bedrock")
+            .protocol("openai")          // 占位：protocol 字段过不了 Protocol.from 的自定义名校验
+            .baseUrl("https://bedrock.internal")
+            .model("anthropic.claude-v2")
+            .build();
+    return Benxin.withCodec(config, new MyBedrockCodec(), transport);   // 真正生效的是这一行
+}
+```
+
+代价是要自己装配整个模型、绕过了 `protocol` 配置项 —— 与"协议与厂商正交"的初衷有出入，
+因此这条边界写在最显眼的地方，而不是留给使用者去踩。
 
 ---
 
@@ -264,7 +344,7 @@ public class MyBedrockCodec implements ProtocolCodec {
 |---|---|---|
 | `dsh-minimal` | DSH 极简 | `调模型 → 有工具就执行 → 再调模型`，约 80 行。零内置工具、零压缩，**故意什么都不多做**，是"一切可插拔"的最小样板 |
 | `react` | 经典 ReAct | Thought → Action → Observation；**模型不支持 function calling 时自动降级到文本协议**（解析 `Action:` / `Action Input:` / `Final Answer:`） |
-| `claude-code` | Claude Code | 单一主循环 + **子代理派生**（独立上下文、只回传结论）+ 待办管理 + **自动上下文压缩** + 连续工具错误熔断 |
+| `claude-code` | Claude Code | 单一主循环 + **子代理派生**（独立上下文、只回传结论）+ 待办管理 + **自动上下文压缩** + **连续工具错误提醒**（注入一条"停下来重新评估"的提醒让模型自己改，**不强制停机**） |
 | `codex` | OpenAI Codex | **turn 制**：`update_plan` 出计划 → `apply_patch` 做最小改动 → 命令验证；**如实告知沙箱权限边界**；未验证则给一次补验证的机会 |
 | `plan-execute` | 经典范式 | 第一步强制产出编号计划，之后逐步推进并回显进度 |
 | `reflexion` | 经典范式 | 执行 → 自省评分 → 低于阈值则带着批评重做 |
@@ -305,6 +385,11 @@ public class MyLoop extends AbstractAgentLoop {
 `LoopContext` 提供：`callModel()` / `executeTools()` / `callTool()` / `append()` /
 `spawnSubAgent()` / `emit()` / `messages()` / `attributes()` / `outOfBudget()`。
 
+自定 Loop 还可以实现 `SubAgentObserver`：子代理的真实派生路径
+（`task` 工具 → `ToolContext.spawn` → `DefaultLoopContext.spawn`）会回调它，
+因此"补记子代理用量、发出自己的子代理事件"不再需要另写一个没人调用的入口方法
+（用量补记本身由 `DefaultLoopContext` 统一做掉，所有 Loop 一起受益）。
+
 ---
 
 ## 工作流模式
@@ -338,10 +423,16 @@ nodes:
     type: tool              # 不经过模型，直接调工具
     tool: get_current_time
 
-  - id: mark
-    type: set               # 写变量，供后续模板引用
+  # 两条分支各写各的变量：把 set 放在分支之后，"走了哪条路"才是可读的
+  - id: stamp-urgent
+    type: set
     set:
       channel: 加急通道
+
+  - id: stamp-normal
+    type: set
+    set:
+      channel: 常规通道
 
   - id: report
     type: end               # 渲染 output 作为最终答案
@@ -357,14 +448,22 @@ edges:
     to: urgent
     when: "${input} contains 紧急"
   - from: route
-    to: mark
+    to: stamp-normal
   - from: urgent
-    to: mark
-  - from: mark
+    to: stamp-urgent
+  - from: stamp-urgent
+    to: stamp
+  - from: stamp-normal
     to: stamp
   - from: stamp
     to: report
 ```
+
+> 注意上面这处**分支与变量**的写法：两条分支各自 `set` 自己的 `channel`，然后汇聚到 `stamp`。
+> 如果把 `channel` 写在两条分支**共同的下游**（例如单独一个 `mark` 节点）上，
+> 那么无论走哪条路 `${channel}` 都会被写成同一个值 —— 它就不能像注释暗示的那样
+> "记下走了哪条路"了。加载期会对"默认边之前还有条件边"（那之后的边永远不可达）打警告，
+> 但"变量写在了汇聚点上"这种语义错误只能靠这条经验法则避免。
 
 用它不需要写任何 Java —— 声明一眼就能引用：
 
@@ -390,10 +489,24 @@ ${log} matches (?i)error|异常
 ${summary} is not empty
 ```
 
+> `exists` 的语义是 **"≠ null"**，不是"非空"：变量被 `set` 成空串时
+> `"" exists` 为 `true`，同时 `"" is empty` 也为 `true`。想判断"有内容"请用 `is not empty`。
+
 **模板**用 `${名称}` 取值：`${input}` 是任务原文，`${last}` 是上一个输出，
 `${error}` 是上次失败原因，其余是节点 id 或 `set` 写入的变量。
 `${名称:-兜底值}` 提供默认值；**取不到的占位符保留原文**，让拼写错误一眼可见，
 而不是静默变成空串。
+
+**节点级容错**：`retry: N` 与 `continueOnError: true` 对 `agent` 节点与 `tool` 节点一视同仁 ——
+工具不存在、被沙箱拒绝、工具抛异常、超时都会算作"该节点失败"，从而触发重试或补偿分支
+（`tool` 节点不再把一句"未知工具 […]"当成正常输出悄悄流下去）。
+
+**轨迹口径**：一次"尝试执行"就算一次访问（含被死循环护栏拦下的那一次、含硬失败的那一次），
+因此 `WorkflowRun.visited()` 与 `workflow.node` 事件证明的是"**尝试过**哪些节点"。
+`executions()` 数的是访问次数，**不含重试**；重试另记在 `workflow.node-retry` 事件里。
+护栏触发时事件里的 `visits` 与实际落库的访问数**口径一致**。
+预算耗尽时 `AgentResult.maxStepsReached()` 为 `true`（与其它 Loop 一致），
+`WorkflowRun.truncated()` 仍是最直接的判据。
 
 **三道防线**：步数预算拦住"模型一直调工具"；单节点访问上限
 （`maxVisitsPerNode`，默认 100）拦住"不调模型的死循环"（预算对后者完全无效）；
@@ -512,14 +625,38 @@ llm:
     workdir: .                  # 沙箱围栏根目录，所有路径必须落在其内
     allow-write: false          # ② 写文件，默认关
     allow-exec: false           # ③ 执行命令，默认关
-    allowed-commands: []        # 非空则命令必须以此开头（白名单）
-    denied-commands: []         # 命中即拒绝（黑名单，内置一批危险命令）
+    allowed-commands: []        # 非空则命令必须以此开头（白名单，替换语义）
+    denied-commands: []         # 命中即拒绝（黑名单，**追加**在内置那批危险命令之上）
     exec-timeout: 60s
     max-output-chars: 30000
+    enabled: []                 # 精确点名：**增量**叠加在只读基线上，不是白名单
 ```
+
+三点值得单独说明：
+
+* **`enabled` 是增量，不是白名单。** 只读三件套（`read` / `glob` / `grep`）永远是基线，
+  `enabled: [read]` 的最终结果是 `read + glob + grep`，不是"只有 read"。
+  另外 `todo_write` 与 `task` **不在**默认基线里 —— 想要它们必须显式点名。
+  八个全开 = `builtin-enabled: true` + `allow-write: true` + `allow-exec: true`
+  + `enabled: [todo_write, task]`。
+* **`enabled` 里点名写/执行类工具等价于同时授权。** 写 `enabled: [write]` 就会得到
+  `allow-write: true` 的效果，不会出现"工具看得见却每次都被沙箱拒绝"。
+* **`denied-commands` 是追加，不是替换。** 你写的条目叠加在内置的 29 条高危命令之上
+  （`rm -rf /`、`mkfs`、fork bomb、`dd if=`、`shutdown` …），因此"只多加一条 docker"
+  不会让内置那批失去保护。需要整体替换时用代码里的 `SandboxConfig.Builder#deniedCommands(...)`。
 
 即便全部打开，`PathSandbox` 仍会拦住目录穿越、`.git/`、`.env`、`*.pem`、`id_rsa` 等敏感路径，
 `CommandSandbox` 仍会拦住 `rm -rf /`、`mkfs`、fork bomb 等模式。
+
+**沙箱与内置工具开关无关。** `llm.tools.builtin-enabled=false` 只是"不装配内置工具"，
+容器里的 `ToolSandbox` 依然是真正的 `PathSandbox + CommandSandbox` ——
+**你自己写的 `@LlmTool` 同样受围栏约束**（以前这里会退化成 `ToolSandbox.permissive()`，
+等于默认配置下根本没有沙箱）。
+
+**沙箱拒绝是硬约束，不可被审批覆盖。** `ApprovalPolicy.ON_FAILURE` 的语义是
+"调用失败之后再问一次"，而沙箱拒绝表达的是使用者在配置里写死的边界，因此不会被
+审批 handler 推翻。另外注意 `NEVER` 是 **"不问、直接放行"**（最宽松的一档），
+不是"不问就拒绝"；想一律拒绝请用 `ApprovalHandler.denyAll()`。
 
 ---
 
@@ -637,6 +774,18 @@ r.maxStepsReached(); // 是否因步数上限中断
 r.attributes();    // 循环写入的统计信息
 ```
 
+### 几条容易猜错的行为口径
+
+| 行为 | 实际口径 |
+|---|---|
+| 模型声明 `capabilities().streaming == false` | `LoopContext.callModel` 改走 **`chat()` 同步分支**（因此自定义传输层只实现 `post()` + `decode()` 也能在 Agent 路径上跑通）；支持流式的仍走 `stream()` |
+| 自定义传输层在 `postStreaming()` 里返回非流式响应 | 得到一条可读的 `ModelException`（提示必须返回 `TransportResponse.streaming(...)`），而不是 `SseParser` 里的 NPE |
+| 流式重试 | `onStart` 在一次 `stream()` 调用内**恰好一次**，重试不会让订阅方被重新初始化；已经吐出内容后不再重试 |
+| 子代理用量 | 补记进父上下文（`AgentResult.usage()` 含子代理消耗），并广播平台级 `subagent_start/end`；claude-code 另有 `claude-code.subagent-start/end` |
+| claude-code 兜底系统提示词 | 幂等：历史里已有同一段提示时不再重复注入（开记忆也不会线性累积） |
+| `ModelRegistry.defaultName()` / `defaultModel()` | 两者口径一致：配置的默认名取不到时都回退到**按注册顺序的第一个**模型（`LinkedHashMap`，结果稳定）；想拿"配置里原样写的名字"用 `configuredDefaultName()` |
+| 工作流预算中断 | `AgentResult.maxStepsReached()` 为 `true`，且 `WorkflowRun.truncated()` 为 `true`（两者不再矛盾） |
+
 ### HTTP 端点（需显式开启）
 
 ```yaml
@@ -653,6 +802,17 @@ llm:
 | `GET` | `/llm/models` | 列出全部模型 |
 | `POST` | `/llm/agents/{name}/chat` | 同步对话 |
 | `GET` | `/llm/agents/{name}/stream` | SSE 流式（`delta` / `thinking` / `tool_call` / `done` / `error`） |
+
+**端点的实际契约**（这些是"按直觉猜会猜错"的部分，写在这里免得只能读源码）：
+
+| 场景 | 直觉预期 | 实际行为 |
+|---|---|---|
+| `POST /llm/agents/{不存在的名字}/chat` | 404 | **404**（返回 `{status, error, message, path}`） |
+| 不传 `sessionId` | 每次调用独立 | **每次调用独立**（响应里的 `sessionId` 是新生成的 `http-<uuid>`）；要续接历史必须显式传 |
+| `@LlmAgent` 不声明 `tools` / `toolNames` | "没有工具" | **继承容器的全局工具表** —— "什么都不写"等于"拿到所有工具"。想收紧请显式列出 `tools` / `toolNames` |
+| 方法级 `@SystemPrompt` / `@Ctx` / `@User` | 在 HTTP 端点上生效 | **完全不生效**：端点按 Agent 名调用，不经过方法绑定，只认 Agent 级 `systemPrompt` |
+| 运行失败 | 也会留一条记录 | 失败路径只广播 `onError`，**不产生** `agent_run` 行（需要在监听器里自行处理 `onError`） |
+| SSE 事件里的 `tool_result` | 存在 | **不存在**：`LlmStreamHandler` 没有对应回调；工具结果只在 `done` 事件的 `toolCalls` 里 |
 
 > 默认关闭是刻意的：这是一个能触发模型调用、并可能间接驱动本地工具执行的入口，
 > 不应该因为"引了依赖"就自动对外。开启前请自行加鉴权。
@@ -696,7 +856,7 @@ benxin/
 cd benxin
 mvn -o clean install          # 构建三个模块并装入本地仓库
 cd benxin-examples
-mvn -o spring-boot:run        # 启动即打印 6 个演示
+mvn -o spring-boot:run        # 启动即打印 7 个演示
 ```
 
 或者直接跑打好的可执行包：
@@ -730,6 +890,9 @@ java -jar benxin-examples/target/benxin-examples-1.0.0.jar
 
 ⑥ 程序化组装 —— 不用注解也能换掉任意组件
    装配结果: Agent[manual-agent → react / mock / 工具 [get_current_time, calculate, get_weather]]
+
+⑦ 声明式工作流 —— 图写在 YAML 里，模型只负责填内容
+   路径: begin → classify → route → urgent → stamp-urgent → stamp → report
 ```
 
 示例应用同时开启了 HTTP 层（`llm.web.enabled=true`），可直接验证：
@@ -764,7 +927,7 @@ mvn -o spring-boot:run -Dspring-boot.run.profiles=real
 ```
 
 示例覆盖：声明式调用、工具闭环、自定义 Loop、流式输出、强类型返回值、
-程序化组装（不用注解也能换掉任意组件）、拦截器生效范围。
+程序化组装（不用注解也能换掉任意组件）、拦截器生效范围、**声明式工作流**。
 
 ---
 
@@ -803,7 +966,8 @@ cd benxin
 mvn -o test
 ```
 
-**101 个测试全部通过**（benxin-core 63 / starter 29 / examples 9），全部离线、不消耗 token：
+**212 个测试全部通过**（benxin-core 163 / starter 35 / examples 14，共 17 个测试类），
+全部离线、不消耗 token：
 
 | 测试类 | 数量 | 覆盖 |
 |---|---|---|
@@ -814,9 +978,16 @@ mvn -o test
 | `ToolScannerTest` | 6 | 注解扫描、方法名兜底、参数绑定与默认值、`ToolContext` 注入、异常转错误、DTO 序列化 |
 | `JsonSchemaGeneratorTest` | 6 | 类型映射、枚举、集合、嵌套 POJO、`Optional` 解包、required 规则 |
 | `AgentRuntimeTest` | 18 | 工具闭环、未知工具、沙箱拒绝、审批拒绝与放行、拦截器短路与改写、`returnDirect`、步数上限、记忆、生命周期事件、**并行结果顺序**、超时、结果截断、用量累计、`toBuilder` 隔离 |
-| `LlmAutoConfigurationTest` | 12 | 条件装配、6 个内置 Loop、用户 bean 覆盖（记忆/压缩器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册 |
+| `ConditionsTest` | 28 | 工作流条件表达式：全部运算符、`not/and/or` 与括号、`is empty` / `exists` / `missing`、语法错误提示 |
+| `WorkflowEngineTest` | 21 | 六种节点、边序即优先级、回边循环、`maxVisitsPerNode` 护栏、节点 `retry`、`continueOnError` 补偿、预算中断 |
+| `WorkflowIoTest` | 18 | YAML/JSON 读写往返、缺字段与非法字段的加载期报错、`retry` / `maxStepsPerNode` 解析 |
+| `StagedLoopTest` | 10 | 规划 → 执行 → 验收 → 修复 → 汇总；关掉验收后退化为「带汇总的 plan-execute」 |
+| `WorkflowLoopTest` | 9 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes |
+| `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
+| `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
+| `LlmAutoConfigurationTest` | 18 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册 |
 | `LlmAgentProxyTest` | 17 | **注解接口 → 代理 → 运行时 → 模型** 全链路：参数语义、`@Ctx` 不泄漏、`@SystemPrompt` 渲染、DTO 返回、流式回调、多轮记忆、工具装配、单例与 Object 方法 |
-| `BenxinExampleApplicationTest` | 9 | 示例应用装配：4 个 Agent、7 个 Loop、离线模型、工具扫描、安全默认值 |
+| `BenxinExampleApplicationTest` | 14 | 示例应用装配：6 个 Agent、7 个 Loop、离线模型、工具扫描、安全默认值、声明式工作流 |
 
 ---
 

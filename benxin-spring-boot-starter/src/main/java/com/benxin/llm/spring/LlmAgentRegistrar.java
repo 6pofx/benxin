@@ -10,10 +10,12 @@ import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.boot.autoconfigure.AutoConfigurationPackages;
+import org.springframework.context.EnvironmentAware;
 import org.springframework.context.ResourceLoaderAware;
 import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
 import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
 import org.springframework.core.annotation.AnnotationAttributes;
+import org.springframework.core.env.Environment;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.type.AnnotationMetadata;
 import org.springframework.core.type.filter.AnnotationTypeFilter;
@@ -34,12 +36,14 @@ import java.util.Set;
  *       {@code @SpringBootApplication} 所在包，实现"零配置可用"。</li>
  * </ul>
  */
-public class LlmAgentRegistrar implements ImportBeanDefinitionRegistrar, BeanFactoryAware, ResourceLoaderAware {
+public class LlmAgentRegistrar implements ImportBeanDefinitionRegistrar, BeanFactoryAware, ResourceLoaderAware,
+        EnvironmentAware {
 
     private static final Logger log = LoggerFactory.getLogger(LlmAgentRegistrar.class);
 
     private BeanFactory beanFactory;
     private ResourceLoader resourceLoader;
+    private Environment environment;
 
     @Override
     public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
@@ -52,8 +56,21 @@ public class LlmAgentRegistrar implements ImportBeanDefinitionRegistrar, BeanFac
     }
 
     @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
+    }
+
+    @Override
     public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata,
                                         BeanDefinitionRegistry registry) {
+        if (!llmEnabled()) {
+            // 总开关关掉时不要注册代理 bean：否则容器里会留着一批"一用就炸"的 bean ——
+            // 它们需要的 LlmAgentFactory 来自已被关停的自动配置，失败被推迟到第一次调用
+            // 而不是启动期暴露，属于最难排查的一类"延迟爆炸"。
+            log.warn("[benxin] llm.enabled=false，跳过 @LlmAgent 接口注册"
+                    + "（@EnableLlmAgents 仍然生效，但本心的自动配置已被总开关关停）");
+            return;
+        }
         Set<String> packages = resolveBasePackages(importingClassMetadata);
         if (packages.isEmpty()) {
             log.warn("[benxin] 未找到可扫描的包，@LlmAgent 接口不会被注册；"
@@ -118,6 +135,13 @@ public class LlmAgentRegistrar implements ImportBeanDefinitionRegistrar, BeanFac
         registry.registerBeanDefinition(beanName, builder.getBeanDefinition());
         log.debug("[benxin] 注册 @LlmAgent 接口 {} 为 bean [{}]", agentInterface.getName(), beanName);
         return true;
+    }
+
+    private boolean llmEnabled() {
+        if (environment == null) {
+            return true;
+        }
+        return environment.getProperty("llm.enabled", Boolean.class, Boolean.TRUE);
     }
 
     private Set<String> resolveBasePackages(AnnotationMetadata metadata) {

@@ -54,6 +54,8 @@ public class AgentBuilder {
     final Map<String, Agent> subAgents = new LinkedHashMap<>();
     ExecutorService toolExecutor;
     boolean autoScanTools = true;
+    /** 防呆硬上限；0 表示不夹取。 */
+    int hardMaxSteps;
 
     public AgentBuilder name(String name) {
         spec.name(name);
@@ -141,6 +143,27 @@ public class AgentBuilder {
     public AgentBuilder maxSteps(int maxSteps) {
         spec.maxSteps(maxSteps);
         return this;
+    }
+
+    /**
+     * 防呆硬上限：无论 {@link #maxSteps(int)} 写了多少，最终都不会超过它。
+     *
+     * <p>夹取下沉到装配层，是为了让"声明式（{@code @LlmAgent}）"与"程序化 {@code Agent.builder()}"
+     * 两条路径共用同一处逻辑 —— 以前它写在 Spring 侧的装配器里，只有注解路径拿得到这道安全阀。
+     * 默认不夹取（{@code 0}）：程序化装配里的 {@code maxSteps} 是代码里的显式意图，
+     * 需要防呆的装配方显式调用本方法（Spring 侧由 {@code LlmAgentFactory} 从
+     * {@code llm.agent.hard-max-steps} 传入）。</p>
+     *
+     * @param value {@code <= 0} 表示不夹取
+     */
+    public AgentBuilder hardMaxSteps(int value) {
+        this.hardMaxSteps = Math.max(0, value);
+        return this;
+    }
+
+    /** 当前生效的防呆硬上限；{@code 0} 表示不夹取。 */
+    public int hardMaxSteps() {
+        return hardMaxSteps;
     }
 
     public AgentBuilder stream(boolean stream) {
@@ -237,6 +260,10 @@ public class AgentBuilder {
 
     public Agent build() {
         Objects.requireNonNull(spec, "spec");
+        // 唯一一处硬上限夹取：两条装配路径都从这里过
+        if (hardMaxSteps > 0 && spec.build().maxSteps() > hardMaxSteps) {
+            spec.maxSteps(hardMaxSteps);
+        }
         interceptors.sort(Comparator.comparingInt(AgentInterceptor::order));
         AgentListener composite = CompositeListener.of(listeners);
         return new DefaultAgent(this, composite);

@@ -14,6 +14,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 把一个 {@code @LlmTool} 方法包装成 {@link ToolCallback}。
@@ -129,6 +130,11 @@ public class MethodToolCallback implements ToolCallback {
             raw = annotation.defaultValue();
         }
         if (raw == null) {
+            if (Optional.class.isAssignableFrom(type)) {
+                // 缺参必须绑成 Optional.empty()，而不是 null ——
+                // 否则"可选参数"会变成唯一一个按文档自然写法（note.orElse("兜底")）必然 NPE 的参数。
+                return Optional.empty();
+            }
             if (type.isPrimitive()) {
                 return primitiveDefault(type);
             }
@@ -138,6 +144,9 @@ public class MethodToolCallback implements ToolCallback {
             return raw;
         }
         if (raw instanceof JsonNode node) {
+            if (node.isNull()) {
+                return Optional.class.isAssignableFrom(type) ? Optional.empty() : null;
+            }
             return Json.convert(node, type);
         }
         try {

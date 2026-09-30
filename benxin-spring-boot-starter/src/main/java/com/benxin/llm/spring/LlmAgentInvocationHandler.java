@@ -139,7 +139,7 @@ public class LlmAgentInvocationHandler implements InvocationHandler {
         }
 
         Agent target = agent();
-        String systemPrompt = binding.resolveSystemPrompt(templateVars, target.spec().systemPrompt());
+        String systemPrompt = binding.resolveSystemPrompt(templateVars, target.spec());
         if (systemPrompt != null) {
             attributes.put(com.benxin.llm.core.agent.AgentAttributes.SYSTEM_PROMPT, systemPrompt);
         }
@@ -166,7 +166,11 @@ public class LlmAgentInvocationHandler implements InvocationHandler {
             return result;
         }
         if (returnType == Optional.class) {
-            return Optional.ofNullable(result.text());
+            // 空文本要落到 Optional.empty()：AgentResult.text() 永不为 null，
+            // 若这里写 Optional.ofNullable(result.text())，"模型什么都没说"这个场景
+            // 会得到一个存在但为空的 Optional，调用方的 orElse(兜底) 永远拿不到兜底值。
+            String text = result.text();
+            return text == null || text.isBlank() ? Optional.empty() : Optional.of(text);
         }
         if (List.class.isAssignableFrom(returnType)) {
             return result.messages();
@@ -295,8 +299,13 @@ public class LlmAgentInvocationHandler implements InvocationHandler {
          * <p>后一点很重要：如果方法没有 {@code @SystemPrompt} 却仍然在这里生成一份
          * 与 Agent 级相同的文本并作为覆盖值下发，用户自定义的 SystemPromptProvider
          * 就会在声明式路径上被静默绕过。</p>
+         *
+         * <p>{@code spec} 必须传真实的 {@link com.benxin.llm.core.agent.AgentSpec}：
+         * 渲染器的内置变量 {@code {agentName}} / {@code {loop}} / {@code {tools}} 全都取自它，
+         * 传 null 会让这三个占位符被替换成空串 —— 而这恰好违反了"取不到的占位符保留原文，
+         * 让拼写错误一眼可见"的承诺（"取到了但值为空串"算有值，于是走替换分支）。</p>
          */
-        String resolveSystemPrompt(Map<String, Object> vars, String agentPrompt) {
+        String resolveSystemPrompt(Map<String, Object> vars, com.benxin.llm.core.agent.AgentSpec spec) {
             boolean declared = systemTemplate != null
                     || append.stream().anyMatch(s -> s != null && !s.isBlank());
             if (!declared) {
@@ -307,11 +316,12 @@ public class LlmAgentInvocationHandler implements InvocationHandler {
                 pieces.add(systemTemplate);
             }
             append.stream().filter(s -> s != null && !s.isBlank()).forEach(pieces::add);
+            String agentPrompt = spec == null ? null : spec.systemPrompt();
             if (inherit && agentPrompt != null && !agentPrompt.isBlank()) {
                 pieces.add(agentPrompt);
             }
             String joined = String.join("\n\n", pieces);
-            return TEMPLATES.render(joined, null, vars);
+            return TEMPLATES.render(joined, spec, vars);
         }
 
         private static String blankToNull(String value) {
