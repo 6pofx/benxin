@@ -211,8 +211,12 @@ public final class WorkflowEngine {
         String message = "节点 [" + node.id() + "]（" + node.type().wireName() + "）执行失败："
                 + (failure == null ? "未知原因" : String.valueOf(failure.getMessage()));
         state.markError(message);
+        // 事件里下发的是同一份 message，而不是裸异常消息：
+        // 同一个失败会出现在四个可观测面上 —— 事件表、访问表（error 列）、${error} 提示词、
+        // 以及出边的条件表达式。它们说法不一致时，排查的人只看一边就会被误导，
+        // 因此统一成"含节点 id 与类型"的那一份（裸消息是它的子串，按原文匹配的调用方不受影响）。
         runtime.emit("workflow.node-error", event("workflow", definition.name(), "node", node.id(),
-                "error", String.valueOf(failure == null ? null : failure.getMessage()),
+                "error", message,
                 "continueOnError", node.continueOnError()));
         if (node.continueOnError()) {
             // 不抛异常，让出边的条件有机会读 ${error} 做补偿分支
