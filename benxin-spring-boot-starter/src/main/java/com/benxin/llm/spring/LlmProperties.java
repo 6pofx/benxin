@@ -108,6 +108,15 @@ public class LlmProperties {
         /** 直接内联的定义文本（YAML 或 JSON）；与 {@link #location} 二选一。 */
         private String inline;
 
+        /**
+         * 内联文本的格式：{@code auto}（默认）/ {@code yaml} / {@code json}。
+         *
+         * <p>{@code auto} 只按"首个非空字符是不是 <code>{</code>"来猜，而 YAML 的 flow 风格
+         * （{@code {name: x, nodes: [...]}}）也以 <code>{</code> 开头，于是会被当成 JSON 解析失败。
+         * 这时显式写 {@code format: yaml} 即可。</p>
+         */
+        private String format = "auto";
+
         public String getLocation() {
             return location;
         }
@@ -122,6 +131,14 @@ public class LlmProperties {
 
         public void setInline(String inline) {
             this.inline = inline;
+        }
+
+        public String getFormat() {
+            return format;
+        }
+
+        public void setFormat(String format) {
+            this.format = format;
         }
     }
 
@@ -291,8 +308,16 @@ public class LlmProperties {
     /** Agent 全局默认值；{@code @LlmAgent} 上未显式指定的属性回落到这里。 */
     public static class AgentProperties {
 
-        /** 默认 Loop 名。 */
-        private String defaultLoop = "dsh-minimal";
+        /**
+         * 默认 Loop 名。
+         *
+         * <p>默认<b>留空</b>："没配"与"配了 dsh-minimal"是两件事 —— 前者应当让
+         * {@code @LlmLoop(defaultLoop = true)} 的自定义 Loop 有机会成为默认，
+         * 后者才是使用者明确指定。留空时的回落顺序：
+         * {@code llm.agent.default-loop} → {@code @LlmLoop(defaultLoop = true)}（多个时按 order 取最小）
+         * → {@code dsh-minimal}。</p>
+         */
+        private String defaultLoop;
 
         private int maxSteps = 24;
 

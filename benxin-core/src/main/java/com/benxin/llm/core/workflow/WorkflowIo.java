@@ -53,11 +53,44 @@ public final class WorkflowIo {
         String content = stripBom(text);
         Format resolved = format == null || format == Format.AUTO ? detect(content) : format;
         Object tree = switch (resolved) {
-            case JSON -> Json.parse(content);
+            case JSON -> parseJson(content);
             case YAML -> YamlSupport.load(content);
             case AUTO -> throw new IllegalStateException("AUTO 应已被解析为具体格式");
         };
         return bind(tree, resolved);
+    }
+
+    /**
+     * 解析 JSON；失败时把"自动识别的结果 + 该往哪查"写进报错里。
+     *
+     * <p>YAML 的 flow 风格（{@code {name: x, nodes: [...]}}）同样以 <code>{</code> 开头，
+     * 会被 {@link Format#AUTO} 认成 JSON，随后抛出的"非法 JSON"把排查方向引到"括号写错了"，
+     * 而真正的问题是格式判定。这里再探一次：若"按 JSON 失败、按 YAML 却能解析"，
+     * 就如实说明这是 YAML 的 flow 风格，并给出可操作的两种改法。</p>
+     */
+    private static Object parseJson(String content) {
+        try {
+            return Json.parse(content);
+        } catch (RuntimeException e) {
+            String hint = parsesAsYaml(content)
+                    ? "注意：这份内容能被 YAML 解析 —— 它其实是 YAML 的 flow 风格（YAML 里 "
+                        + "{a: 1} 这种写法合法），不是 JSON。请显式声明格式"
+                        + "（llm.workflows.<key>.format: yaml，或代码里 WorkflowIo.read(text, Format.YAML)），"
+                        + "或者把它改写成块状 YAML 语法"
+                    : "请检查括号/逗号/引号是否匹配；如果内容其实是 YAML，请显式声明格式"
+                        + "（llm.workflows.<key>.format: yaml）";
+            throw new IllegalArgumentException("工作流定义看起来像 JSON（首个非空字符是 '{'）但解析失败："
+                    + e.getMessage() + "。" + hint, e);
+        }
+    }
+
+    private static boolean parsesAsYaml(String content) {
+        try {
+            YamlSupport.load(content);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     public static WorkflowDefinition read(Path path) {

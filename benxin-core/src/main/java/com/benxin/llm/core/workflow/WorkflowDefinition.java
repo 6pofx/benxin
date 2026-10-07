@@ -200,6 +200,29 @@ public final class WorkflowDefinition {
             throw new IllegalArgumentException("工作流 [" + name + "] 的 maxVisitsPerNode 必须为正数");
         }
         warnUnreachableEdges();
+        warnEdgesLeavingEnd();
+    }
+
+    /**
+     * 加载期提示：END 节点的出边永远不会被执行。
+     *
+     * <p>引擎在 END 处结束推进（{@code case END ->} 只负责产出最终文本），从不求值它的出边。
+     * 于是 {@code end → 后续节点} 是纯死代码：定义能加载、能跑完、不报错、不警告，
+     * 只是后半张图从来没被执行过 —— 与"默认边之前还有条件边"同口径，这里给一条 WARN。</p>
+     */
+    private void warnEdgesLeavingEnd() {
+        for (WorkflowNode node : nodes) {
+            if (node.type() != NodeType.END) {
+                continue;
+            }
+            List<WorkflowEdge> out = outgoing(node.id());
+            if (!out.isEmpty()) {
+                log.warn("[workflow:{}] END 节点 [{}] 还有 {} 条出边 {}，永远不会执行："
+                                + "引擎在 END 处结束推进、END 只产出最终文本。"
+                                + "若本意是继续流转，请把该节点的 type 改成 set 或普通节点",
+                        name, node.id(), out.size(), out);
+            }
+        }
     }
 
     /**

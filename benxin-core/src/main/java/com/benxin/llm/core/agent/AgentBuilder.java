@@ -67,13 +67,23 @@ public class AgentBuilder {
         return this;
     }
 
+    /**
+     * 直接指定模型实例。
+     *
+     * <p>与 {@link #model(String)} 是同一个字段的两种表达，因此<b>后来者胜</b>：
+     * 设了实例就清掉之前设过的名字。否则 {@code agent.toBuilder().model("名字")} 会被
+     * 派生时带过来的实例静默盖掉 —— 表现为"换了个模型跑"，其实用的还是原来那个。</p>
+     */
     public AgentBuilder model(LlmModel model) {
         this.model = model;
+        this.modelName = null;
         return this;
     }
 
+    /** 按注册名指定模型；与 {@link #model(LlmModel)} 后来者胜。 */
     public AgentBuilder model(String name) {
         this.modelName = name;
+        this.model = null;
         return this;
     }
 
@@ -82,13 +92,17 @@ public class AgentBuilder {
         return this;
     }
 
+    /** 直接指定 Loop 实例；与 {@link #loop(String)} 后来者胜。 */
     public AgentBuilder loop(AgentLoop loop) {
         this.loop = loop;
+        this.loopName = null;
         return this;
     }
 
+    /** 按注册名指定 Loop；与 {@link #loop(AgentLoop)} 后来者胜。 */
     public AgentBuilder loop(String name) {
         this.loopName = name;
+        this.loop = null;
         return this;
     }
 

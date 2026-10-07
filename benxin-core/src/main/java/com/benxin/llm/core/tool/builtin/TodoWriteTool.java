@@ -32,8 +32,8 @@ public class TodoWriteTool implements ToolCallback {
 
     public static final String TOOL_NAME = "todo_write";
 
-    /** 运行属性键名。带 {@code benxin.} 前缀避免与宿主应用的自定义属性撞车。 */
-    public static final String ATTRIBUTE_KEY = "benxin.todos";
+    /** 运行属性键名。与 {@link com.benxin.llm.core.agent.AgentAttributes#TODOS} 同源，避免两处字面量漂移。 */
+    public static final String ATTRIBUTE_KEY = com.benxin.llm.core.agent.AgentAttributes.TODOS;
 
     private static final String STATUS_PENDING = "pending";
     private static final String STATUS_IN_PROGRESS = "in_progress";

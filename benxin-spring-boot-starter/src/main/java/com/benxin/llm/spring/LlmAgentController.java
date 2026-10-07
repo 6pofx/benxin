@@ -11,6 +11,7 @@ import com.benxin.llm.core.loop.LoopRegistry;
 import com.benxin.llm.core.tool.ToolInvocation;
 import com.benxin.llm.core.tool.ToolResult;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -52,12 +53,22 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>端点按 <b>Agent 名</b>调用，不经过方法绑定：{@code @SystemPrompt} / {@code @Ctx} /
  *       {@code @User} 这些<b>方法级</b>注解在 HTTP 端点上不生效，只认 Agent 级 {@code systemPrompt}；</li>
  *   <li>失败的运行只广播 {@code onError}，不会产生 {@code agent_run} 行；</li>
- *   <li>{@code @LlmAgent} 不声明 {@code tools} / {@code toolNames} 时继承容器的全局工具表。</li>
+ *   <li>{@code @LlmAgent} 不声明 {@code tools} / {@code toolNames} 时继承容器的全局工具表；</li>
+ *   <li>SSE 响应头是 {@code text/event-stream;charset=UTF-8}（见 {@link #SSE_CONTENT_TYPE}），
+ *       中文事件不会被客户端按 ISO-8859-1 解成乱码。</li>
  * </ul>
  */
 @RestController
 @RequestMapping("${llm.web.base-path:/llm}")
 public class LlmAgentController {
+
+    /**
+     * SSE 的响应类型。
+     *
+     * <p>必须带 {@code charset}：Spring 的 {@code StringHttpMessageConverter} 对 {@code text/*}
+     * 在没有 charset 时按 ISO-8859-1 解码，"北京"会变成 "åäº¬"。</p>
+     */
+    private static final String SSE_CONTENT_TYPE = "text/event-stream;charset=UTF-8";
 
     private static final Logger log = LoggerFactory.getLogger(LlmAgentController.class);
     private static final AtomicInteger THREAD_SEQ = new AtomicInteger();
@@ -110,9 +121,18 @@ public class LlmAgentController {
         return result;
     }
 
-    /** 同步对话。 */
+    /**
+     * 对话入口。
+     *
+     * <p>默认返回 JSON；当这个 Agent 打开了流式（{@code @LlmAgent(stream = true)} 或
+     * {@code llm.agent.stream=true}）时改为返回 SSE —— 这正是使用者对这两个开关的直觉，
+     * 而在 1.1.1 之前它们是**死配置**：写与不写，行为完全一致。</p>
+     *
+     * <p>想显式选择通道时用 {@code /agents/{name}/stream}（永远 SSE）。</p>
+     */
     @PostMapping(value = "/agents/{name}/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Map<String, Object> chat(@PathVariable String name, @RequestBody ChatPayload payload) {
+    public Object chat(@PathVariable String name, @RequestBody ChatPayload payload,
+                       HttpServletResponse response) {
         Agent agent = agentRegistry.get(name);
         // 不传 sessionId 时给一次独立的会话，而不是落到 "<agentName>-default" 上：
         // 后者会让"每次调用看似独立"的直觉与"其实共享同一份历史"的行为对不上，
@@ -120,6 +140,10 @@ public class LlmAgentController {
         String sessionId = payload.sessionId() == null || payload.sessionId().isBlank()
                 ? "http-" + UUID.randomUUID()
                 : payload.sessionId();
+        if (agent.spec().stream()) {
+            response.setContentType(SSE_CONTENT_TYPE);
+            return streamResponse(agent, name, payload.message(), sessionId);
+        }
         AgentResult result = agent.call(payload.message(), sessionId, null);
         return toMap(result);
     }
@@ -130,22 +154,35 @@ public class LlmAgentController {
      *
      * <p>刻意<b>不</b>包含 {@code tool_result}：{@code LlmStreamHandler} 上根本没有对应的回调，
      * 这个事件名发不出来。工具结果只出现在最终 {@code done} 事件里的 {@code toolCalls} 中。</p>
+     *
+     * <p>响应头由 {@link #SSE_CONTENT_TYPE} 显式写死：Spring 的 {@code StringHttpMessageConverter}
+     * 对 {@code text/*} 默认按 ISO-8859-1 解码，不声明 charset 时中文事件到客户端就是乱码。
+     * 注意<b>不能</b>只靠 {@code produces = "text/event-stream;charset=UTF-8"}：
+     * {@code SseEmitter} 的返回值处理器会把 Content-Type 重新写成不带 charset 的
+     * {@code text/event-stream}（实测如此），必须在 response 上直接设置。</p>
      */
-    @GetMapping(value = "/agents/{name}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @GetMapping("/agents/{name}/stream")
     public SseEmitter stream(@PathVariable String name,
                             @RequestParam("message") String message,
-                            @RequestParam(value = "sessionId", required = false) String sessionId) {
+                            @RequestParam(value = "sessionId", required = false) String sessionId,
+                            HttpServletResponse response) {
+        response.setContentType(SSE_CONTENT_TYPE);
         Agent agent = agentRegistry.get(name);
         String effectiveSession = sessionId == null || sessionId.isBlank()
                 ? "http-" + UUID.randomUUID()
                 : sessionId;
+        return streamResponse(agent, name, message, effectiveSession);
+    }
+
+    /** 把一次运行以 SSE 的形式推给调用方（{@code /stream} 与开了流式的 {@code /chat} 共用）。 */
+    private SseEmitter streamResponse(Agent agent, String name, String message, String sessionId) {
         SseEmitter emitter = new SseEmitter(0L);
         emitter.onTimeout(emitter::complete);
         emitter.onError(e -> emitter.complete());
 
         CompletableFuture.runAsync(() -> {
             try {
-                AgentResult result = agent.call(message, effectiveSession, new SseForwarder(emitter));
+                AgentResult result = agent.call(message, sessionId, new SseForwarder(emitter));
                 send(emitter, "done", toMap(result));
                 emitter.complete();
             } catch (RuntimeException e) {

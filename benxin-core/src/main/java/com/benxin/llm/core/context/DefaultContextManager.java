@@ -51,8 +51,8 @@ public class DefaultContextManager implements ContextManager {
                 working.add(message);
             }
         }
-        int budget = budgetOf(model) - reservedOutputTokens;
-        if (budget > 0 && estimator.estimate(working) > budget * threshold) {
+        int budget = budgetOf(model);
+        if (budget > 0 && estimator.estimate(working) > budget) {
             List<ChatMessage> compacted = compactor.compact(working, model, keepRecent);
             if (compacted != null && !compacted.isEmpty()) {
                 return compacted;
@@ -61,9 +61,14 @@ public class DefaultContextManager implements ContextManager {
         return working;
     }
 
+    /**
+     * 输入预算：与压缩器用同一个定义（{@link ContextCompactor#inputBudget}）。
+     *
+     * <p>以前这里是 {@code (max - reserved) * threshold}、压缩器里是
+     * {@code max(1024, max * threshold - reserved)} —— 两个数不同，
+     * 边界上会出现"管理器决定压缩、压缩器却认为不用压"。</p>
+     */
     private int budgetOf(LlmModel model) {
-        return Optional.ofNullable(model)
-                .map(m -> m.capabilities().maxContextTokens())
-                .orElse(128_000);
+        return ContextCompactor.inputBudget(model, threshold, reservedOutputTokens);
     }
 }

@@ -139,8 +139,41 @@ public final class ChatMessage {
         return text().isEmpty() && toolUses().isEmpty() && thinking().isEmpty();
     }
 
-    /** 返回一个仅替换文本内容的副本，其余结构保持不变。 */
+    /**
+     * 返回一个"文本内容被替换"的副本，其余结构保持不变。
+     *
+     * <p>{@link #text()} 的取值来源有两类：{@link TextPart} 的正文，以及
+     * {@link ToolResultPart} 的内容。因此这里的"替换文本"按消息形态分两种：</p>
+     * <ul>
+     *   <li><b>没有正文块、只有工具结果</b>（标准的 TOOL 消息）→ 替换第一条
+     *       {@link ToolResultPart} 的 {@code content}，{@code toolUseId} / 名字 /
+     *       {@code error} 标记原样保留；</li>
+     *   <li><b>其余情况</b> → 用新文本替换 {@link TextPart}，思维链 / 工具调用等
+     *       其它结构保持不变。</li>
+     * </ul>
+     *
+     * <p>以前对工具消息走的是第二种：把新文本插在最前面、并保留原来的工具结果，
+     * 于是 {@code text()} 变成"新文本 + 旧内容"——<b>拿它做上下文压缩会越压越长</b>，
+     * 与 javadoc"仅替换文本内容"读起来的意思相反。</p>
+     */
     public ChatMessage withText(String newText) {
+        boolean hasTextPart = parts.stream().anyMatch(TextPart.class::isInstance);
+        if (!hasTextPart) {
+            int firstResult = -1;
+            for (int i = 0; i < parts.size(); i++) {
+                if (parts.get(i) instanceof ToolResultPart) {
+                    firstResult = i;
+                    break;
+                }
+            }
+            if (firstResult >= 0) {
+                List<ContentPart> rebuilt = new ArrayList<>(parts);
+                ToolResultPart result = (ToolResultPart) rebuilt.get(firstResult);
+                rebuilt.set(firstResult, new ToolResultPart(
+                        result.toolUseId(), result.name(), newText, result.error()));
+                return new ChatMessage(role, rebuilt, name, toolCallId);
+            }
+        }
         List<ContentPart> rebuilt = new ArrayList<>();
         rebuilt.add(new TextPart(newText));
         parts.stream()

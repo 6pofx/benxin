@@ -123,9 +123,17 @@ public class LlmAgentRegistrar implements ImportBeanDefinitionRegistrar, BeanFac
                     + agentInterface.getSimpleName().substring(1);
         }
         String beanName = name;
-        int suffix = 1;
-        while (registry.containsBeanDefinition(beanName)) {
-            beanName = name + "#" + suffix++;
+        if (registry.containsBeanDefinition(beanName)) {
+            // 同一份扫描跑两遍是完全可能的（@SpringBootApplication 自带 @EnableAutoConfiguration，
+            // 又显式写了 AutoConfigurations.of(...)）。以前这里会退化成 name#1 再注册一个同类型 bean，
+            // 之后 getBean(接口.class) 直接 NoUniqueBeanDefinitionException ——
+            // 错误信息里唯一的线索是那个 #1 后缀，没人能从中看出"注册器跑了两遍"。
+            log.warn("[benxin] bean 名 [{}] 已被占用，跳过 @LlmAgent 接口 {} 的注册。"
+                            + "两种常见原因：① 注册器被执行了两次（同时提供自动配置与显式的 @EnableLlmAgents）；"
+                            + "② 两个接口声明了同一个 Agent 名。以前这里会静默退化成 [{}#1]，"
+                            + "再往后 getBean(接口.class) 只会抛 NoUniqueBeanDefinitionException。",
+                    beanName, agentInterface.getName(), name);
+            return false;
         }
         BeanDefinitionBuilder builder = BeanDefinitionBuilder
                 .genericBeanDefinition(LlmAgentFactoryBean.class)

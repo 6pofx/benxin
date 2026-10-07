@@ -39,13 +39,12 @@ public abstract class AbstractAgentLoop implements AgentLoop {
 
     @Override
     public LoopResult run(LoopContext context) {
-        try {
-            LoopResult result = doRun(context);
-            return result == null ? buildResult(context, "") : result;
-        } catch (RuntimeException e) {
-            context.listener().onError(e);
-            throw e;
-        }
+        // 这里不再广播 onError：默认调用链是 DefaultAgent.run → loop.run，
+        // 而 DefaultAgent.run 已经在 catch 里广播过一次，两边都发会让同一个异常
+        // 在监听器（CompositeListener 会扇出给每个 delegate）里出现两次。
+        // 错误的归属者是最外层的 run，Loop 只负责往上抛。
+        LoopResult result = doRun(context);
+        return result == null ? buildResult(context, "") : result;
     }
 
     /** 子类实现真正的循环逻辑。 */

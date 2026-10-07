@@ -17,7 +17,12 @@ public enum ApprovalPolicy {
     /** 每次工具调用都要审批。 */
     ALWAYS,
 
-    /** 先执行；仅当被沙箱拒绝或执行失败时，再询问是否要放行重试。 */
+    /**
+     * 先执行；仅当执行失败时，再询问是否要放行重试（批准则重试一次）。
+     *
+     * <p>注意沙箱拒绝<b>不</b>在此列：那是"这条路径/这条命令不该被执行"的硬边界，
+     * 不是一次运行期的失败，任何审批策略都覆盖不了它（默认的 {@code autoApprove} 尤其不能）。</p>
+     */
     ON_FAILURE;
 
     public static ApprovalPolicy from(String value) {

@@ -69,7 +69,7 @@ public class ClaudeCodeLoop extends AbstractAgentLoop implements SubAgentObserve
     private static final String ATTR_CWD = "benxin.claude-code.cwd";
 
     /** 外部待办工具写给本 Loop 的属性键（由 todo 工具负责写入，本 Loop 只读）。 */
-    private static final String ATTR_TODOS = "benxin.todos";
+    private static final String ATTR_TODOS = com.benxin.llm.core.agent.AgentAttributes.TODOS;
 
     /** 上下文占用超过模型窗口的这个比例时触发压缩。 */
     private static final double COMPACT_TRIGGER_RATIO = 0.7;

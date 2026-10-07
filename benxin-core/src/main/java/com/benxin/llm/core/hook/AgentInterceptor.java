@@ -47,12 +47,18 @@ public interface AgentInterceptor {
     /**
      * 工具执行前拦截。
      *
+     * <p>链按 {@link #order()} 从小到大依次调用，每个拦截器都会收到这次调用 ——
+     * 即使前面已经有拦截器短路，后面的拦截器仍会被调用（否则排在其后的审计拦截器
+     * 对被短路的调用一行记录都留不下），只是它们返回的结果不再生效：
+     * <b>第一个非 null 的返回值胜出</b>，真正的执行被跳过。</p>
+     *
      * @return {@code null} 表示放行；返回非 null 则短路，直接使用该结果
      */
     default ToolResult beforeTool(ToolInvocation invocation) {
         return null;
     }
 
+    /** 工具执行后（含被短路、被沙箱/审批拒绝的调用）。 */
     default void afterTool(ToolInvocation invocation, ToolResult result) {
     }
 }

@@ -93,13 +93,20 @@ public class SummarizingCompactor implements ContextCompactor {
             return fallback.compact(history, model, keepRecent);
         }
 
+        ChatMessage digestMessage = ChatMessage.user(
+                "[本心历史摘要] 以下是更早对话的压缩摘要，请把它当作已知背景：\n\n" + digest);
         List<ChatMessage> result = new ArrayList<>(system);
-        result.add(ChatMessage.user("[本心历史摘要] 以下是更早对话的压缩摘要，请把它当作已知背景：\n\n" + digest));
+        result.add(digestMessage);
         result.addAll(recent);
 
-        // 摘要本身也可能仍然超预算，再兜一层
+        // 摘要 + 最近几条仍然超预算时，要压的是"最近的原文"，而不是再滑掉摘要本身 ——
+        // 摘要就是这次压缩的产物，把它滑出去等于白花一次模型调用（小窗口模型上
+        // 表现为"压缩完摘要就不见了"，正是以前的兜底路径干的事）。
         if (estimator.estimate(result) > budget) {
-            return fallback.compact(result, model, keepRecent);
+            List<ChatMessage> trimmedRecent = fallback.compact(recent, model, keepRecent);
+            result = new ArrayList<>(system);
+            result.add(digestMessage);
+            result.addAll(trimmedRecent);
         }
         return result;
     }
@@ -136,6 +143,7 @@ public class SummarizingCompactor implements ContextCompactor {
     }
 
     private int budgetOf(LlmModel model) {
-        return (int) Math.max(1024, model.capabilities().maxContextTokens() * threshold - 4096);
+        // 与 ContextManager / SlidingWindowCompactor 同一个预算定义（见 ContextCompactor#inputBudget）
+        return ContextCompactor.inputBudget(model, threshold, 4096);
     }
 }

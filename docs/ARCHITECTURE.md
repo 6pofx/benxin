@@ -194,20 +194,33 @@ LlmModel  =  ProtocolCodec  +  ModelConfig  +  HttpTransport
 ```
 ToolUsePart（模型请求）
   │
-  ├─ ① 拦截器 beforeTool      → 返回非 null 即短路，不再执行
-  ├─ ② ToolSandbox.check      → 路径围栏 / 命令白名单 / 写权限闸门
-  ├─ ③ ApprovalPolicy + Handler
+  ├─ ① ToolSandbox.check      → 路径围栏 / 命令白名单 / 写权限闸门（硬约束，不可被审批覆盖）
+  ├─ ② ApprovalPolicy + Handler → 被拒时把理由一并回灌给模型
   │      NEVER      从不询问
   │      ON_REQUEST 工具 requiresApproval() 为真才问（默认）
   │      ALWAYS     每次都问
-  │      ON_FAILURE 被沙箱拒绝后再问一次
+  │      ON_FAILURE 先执行；执行失败后再问一次，批准则重试一次（沙箱拒绝不在此列）
+  ├─ ③ 拦截器 beforeTool      → 返回非 null 即短路，不再执行；
+  │                              链上每个拦截器都会收到这次调用，第一个非 null 的结果胜出
   ├─ ④ 执行（带超时；并行调用乱序完成但按声明顺序记账）
   └─ ⑤ 结果截断 → 拦截器 afterTool → 监听器 → 审计记录
 ```
 
+> **顺序是"沙箱 → 审批 → 拦截器"，不是文档早先写的"拦截器最先"。**
+> 安全上沙箱优先更稳（拒绝后的调用连拦截器都不必惊动），但代价是：
+> **拦截器只能看到通过沙箱的调用**。想在拦截器里审计"含被沙箱拒绝的全部调用"是做不到的，
+> 请改用 `AgentListener` 或沙箱自身的日志。
+
+`beforeTool` 的短路语义：**短路只跳过"执行"，不跳过"通知"** —— 排在短路拦截器之后的
+拦截器仍会收到这次调用的 `beforeTool` 与 `afterTool`（否则审计拦截器的顺序一换就什么都看不到），
+只是它们返回的结果不再生效。
+
 任何一步失败都变成 `ToolResult.error(中文原因)` **回灌给模型**，而不是抛异常。
 原因是：模型看到"路径越界了"会自己换一种做法，而抛异常只会让整条链断掉，
 把一个可自愈的问题变成一个必须人工介入的故障。
+
+审批被拒时的文本是 `用户拒绝执行工具 [名字]：<理由>`：`ApprovalHandler` 可以覆写
+`decide(...)` 返回带理由的 `ApprovalDecision`，让模型知道"为什么不行"而不是只看到"不行"。
 
 ---
 

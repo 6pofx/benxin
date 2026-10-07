@@ -28,8 +28,8 @@ public class TaskTool implements ToolCallback {
 
     public static final String TOOL_NAME = "task";
 
-    /** 运行属性键：默认子代理名。 */
-    public static final String DEFAULT_SUBAGENT_KEY = "benxin.default-subagent";
+    /** 运行属性键：默认子代理名。与 {@code AgentAttributes.DEFAULT_SUB_AGENT} 同源。 */
+    public static final String DEFAULT_SUBAGENT_KEY = com.benxin.llm.core.agent.AgentAttributes.DEFAULT_SUB_AGENT;
 
     /** 传给子代理的运行属性键：任务简述。 */
     public static final String TASK_DESCRIPTION_KEY = "benxin.task.description";

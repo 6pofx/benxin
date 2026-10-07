@@ -4,24 +4,31 @@ import com.benxin.llm.core.agent.Agent;
 import com.benxin.llm.core.agent.AgentBuilder;
 import com.benxin.llm.core.agent.AgentSpec;
 import com.benxin.llm.core.annotation.LlmAgent;
+import com.benxin.llm.core.annotation.LlmRetry;
 import com.benxin.llm.core.context.ContextManager;
 import com.benxin.llm.core.hook.AgentInterceptor;
 import com.benxin.llm.core.hook.AgentListener;
 import com.benxin.llm.core.loop.LoopRegistry;
 import com.benxin.llm.core.memory.MemoryStore;
+import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.model.ModelRegistry;
+import com.benxin.llm.core.model.impl.RetryingLlmModel;
 import com.benxin.llm.core.prompt.SystemPromptProvider;
 import com.benxin.llm.core.sandbox.ApprovalHandler;
 import com.benxin.llm.core.sandbox.ApprovalPolicy;
 import com.benxin.llm.core.sandbox.ToolSandbox;
+import com.benxin.llm.core.tool.RetryingToolCallback;
+import com.benxin.llm.core.tool.ToolCallback;
 import com.benxin.llm.core.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -46,8 +53,8 @@ public class LlmAgentFactory implements BeanFactoryAware {
     private final ContextManager contextManager;
     private final MemoryStore memoryStore;
     private final SystemPromptProvider systemPromptProvider;
-    private final ToolSandbox sandbox;
-    private final ApprovalHandler approvalHandler;
+    private final ObjectProvider<ToolSandbox> sandboxProvider;
+    private final ObjectProvider<ApprovalHandler> approvalHandlerProvider;
     private final AgentRegistry agentRegistry;
     private final ObjectProvider<LlmInterceptorChain> interceptorChainProvider;
     private final ObjectProvider<AgentListener> listenerProvider;
@@ -61,8 +68,8 @@ public class LlmAgentFactory implements BeanFactoryAware {
                            ContextManager contextManager,
                            MemoryStore memoryStore,
                            SystemPromptProvider systemPromptProvider,
-                           ToolSandbox sandbox,
-                           ApprovalHandler approvalHandler,
+                           ObjectProvider<ToolSandbox> sandboxProvider,
+                           ObjectProvider<ApprovalHandler> approvalHandlerProvider,
                            AgentRegistry agentRegistry,
                            ObjectProvider<LlmInterceptorChain> interceptorChainProvider,
                            ObjectProvider<AgentListener> listenerProvider) {
@@ -73,8 +80,8 @@ public class LlmAgentFactory implements BeanFactoryAware {
         this.contextManager = contextManager;
         this.memoryStore = memoryStore;
         this.systemPromptProvider = systemPromptProvider;
-        this.sandbox = sandbox;
-        this.approvalHandler = approvalHandler;
+        this.sandboxProvider = sandboxProvider;
+        this.approvalHandlerProvider = approvalHandlerProvider;
         this.agentRegistry = agentRegistry;
         this.interceptorChainProvider = interceptorChainProvider;
         this.listenerProvider = listenerProvider;
@@ -134,7 +141,62 @@ public class LlmAgentFactory implements BeanFactoryAware {
     public Agent createFromInterface(Class<?> agentInterface) {
         LlmAgent annotation = agentInterface.getAnnotation(LlmAgent.class);
         AgentSpec spec = specOf(agentInterface);
-        return create(spec, resolveTools(annotation, spec.name()), annotationInterceptors(annotation));
+        ToolRegistry tools = resolveTools(annotation, spec.name());
+        RetryPolicy retry = resolveRetryPolicy(agentInterface);
+        if (retry != null && retry.includeTools()) {
+            tools = withToolRetries(tools, retry.annotation());
+        }
+        return create(spec, tools, annotationInterceptors(annotation), retry == null ? null : retry.annotation());
+    }
+
+    /**
+     * 读取 {@code @LlmRetry} 策略。
+     *
+     * <p>这个注解以前在整个仓库里只有定义、没有任何消费点 —— 按 README 打了它等于没打。
+     * 现在它的落点是：<b>模型调用</b>（包一层 {@code RetryingLlmModel}），
+     * {@code includeTools = true} 时再加上<b>该 Agent 的全部工具</b>（包 {@code RetryingToolCallback}）。</p>
+     *
+     * <p>接口上写最直观；写在接口方法上时，取"尝试次数最大"的那条作为整个 Agent 的策略
+     * （模型调用无法按方法区分），{@code includeTools} 则是"有一条写了 true 就算 true"。</p>
+     */
+    /** 解析后的重试策略：注解本体 + 合成出来的 {@code includeTools}。 */
+    private record RetryPolicy(LlmRetry annotation, boolean includeTools) {
+    }
+
+    /**
+     * 读取 {@code @LlmRetry} 策略。
+     *
+     * <p>这个注解以前在整个仓库里只有定义、没有任何消费点 —— 按 README 打了它等于没打
+     * （既不重试、也不报错、也不警告）。现在它的落点是：<b>模型调用</b>
+     * （包一层 {@link RetryingLlmModel}），{@code includeTools = true} 时再加上
+     * <b>该 Agent 的全部工具</b>（包 {@link RetryingToolCallback}）。</p>
+     *
+     * <p>接口上写最直观；写在接口方法上时，取"尝试次数最大"的那条作为整个 Agent 的策略
+     * （模型调用无法按方法区分），{@code includeTools} 则是"有一条写了 true 就算 true"。</p>
+     */
+    private RetryPolicy resolveRetryPolicy(Class<?> agentInterface) {
+        LlmRetry strongest = agentInterface.getAnnotation(LlmRetry.class);
+        boolean includeTools = strongest != null && strongest.includeTools();
+        for (Method method : agentInterface.getMethods()) {
+            LlmRetry onMethod = method.getAnnotation(LlmRetry.class);
+            if (onMethod == null) {
+                continue;
+            }
+            includeTools |= onMethod.includeTools();
+            if (strongest == null || onMethod.maxAttempts() > strongest.maxAttempts()) {
+                strongest = onMethod;
+            }
+        }
+        return strongest == null ? null : new RetryPolicy(strongest, includeTools);
+    }
+
+    /** 给注册表里的每个工具包一层重试装饰器（{@code @LlmRetry(includeTools = true)} 时使用）。 */
+    private ToolRegistry withToolRetries(ToolRegistry tools, LlmRetry retry) {
+        return ToolRegistry.of(tools.all().stream()
+                .map(callback -> callback instanceof RetryingToolCallback ? callback
+                        : (ToolCallback) new RetryingToolCallback(callback, retry.maxAttempts(),
+                                retry.backoffMillis(), retry.multiplier()))
+                .toList());
     }
 
     /** 用一个现成的 {@link AgentSpec} 构建 Agent（工具取全局工具集）。 */
@@ -153,6 +215,11 @@ public class LlmAgentFactory implements BeanFactoryAware {
      * @param extraInterceptors {@code @LlmAgent(interceptors = {...})} 实例化出来的拦截器
      */
     public Agent create(AgentSpec spec, ToolRegistry tools, List<AgentInterceptor> extraInterceptors) {
+        return create(spec, tools, extraInterceptors, null);
+    }
+
+    private Agent create(AgentSpec spec, ToolRegistry tools, List<AgentInterceptor> extraInterceptors,
+                         LlmRetry retry) {
         LlmProperties.AgentProperties defaults = properties.getAgent();
         int maxSteps = Math.max(1, spec.maxSteps());
 
@@ -170,8 +237,8 @@ public class LlmAgentFactory implements BeanFactoryAware {
                 .contextManager(contextManager)
                 .memoryStore(memoryStore)
                 .systemPromptProvider(systemPromptProvider)
-                .sandbox(sandbox)
-                .approvalHandler(approvalHandler)
+                .sandbox(selectFor(spec.name(), sandboxProvider, ToolSandbox.class))
+                .approvalHandler(selectFor(spec.name(), approvalHandlerProvider, ApprovalHandler.class))
                 .approvalPolicy(ApprovalPolicy.from(defaults.getApprovalPolicy()))
                 .hardMaxSteps(defaults.getHardMaxSteps())
                 .interceptors(interceptors)
@@ -179,6 +246,10 @@ public class LlmAgentFactory implements BeanFactoryAware {
 
         if (spec.model() != null) {
             builder.model(spec.model());
+        }
+        if (retry != null) {
+            // 实例后设，按 AgentBuilder 的"后设者胜"覆盖上面的名字解析（见 model(String)/model(LlmModel) 的约定）
+            builder.model(withModelRetry(spec, retry));
         }
         if (spec.loop() != null) {
             builder.loop(spec.loop());
@@ -247,6 +318,56 @@ public class LlmAgentFactory implements BeanFactoryAware {
             return parts.get(0);
         }
         return ToolRegistry.composite(parts.toArray(new ToolRegistry[0]));
+    }
+
+    /**
+     * 按 {@code @LlmRetry} 给模型包一层重试装饰器。
+     *
+     * <p>{@code maxAttempts} 是"含首次"的口径，而 {@code RetryingLlmModel} 收的是"不含首次"的
+     * 重试次数，这里做一次换算 —— 两个口径都各自合理，混用就会差一次。</p>
+     */
+    private LlmModel withModelRetry(AgentSpec spec, LlmRetry retry) {
+        LlmModel base = spec.model() == null ? modelRegistry.defaultModel() : modelRegistry.get(spec.model());
+        return new RetryingLlmModel(base, Math.max(0, retry.maxAttempts() - 1),
+                retry.backoffMillis(), retry.multiplier());
+    }
+
+    /**
+     * 为某个 Agent 选择沙箱 / 审批器。
+     *
+     * <p>挑选顺序：① bean 名与 Agent 名相同的那个 → ② 唯一的那个（或被 {@code @Primary} 标记的那个）。
+     * 两者都定不下来时抛异常并列出候选，要求使用者用 bean 名或 {@code @Primary} 明确表态 ——
+     * 沙箱与审批器是安全相关的组件，替使用者随便挑一个是危险的。</p>
+     *
+     * <p>以前这里是构造注入裸类型：容器里只要出现第二个同类型 bean，应用会在启动时直接
+     * {@code NoUniqueBeanDefinitionException}，于是"给这个 Agent 换一套审批策略"这种正常需求
+     * 只能靠 {@code @Primary} 绕开，做不到按 Agent 区分。</p>
+     *
+     * @return 选中的组件；容器里一个都没有时返回 {@code null}（由 {@link AgentBuilder} 用内置默认值兜底）
+     */
+    private <T> T selectFor(String agentName, ObjectProvider<T> provider, Class<T> type) {
+        if (beanFactory instanceof ListableBeanFactory listable
+                && agentName != null && !agentName.isBlank()) {
+            for (String beanName : listable.getBeanNamesForType(type, true, false)) {
+                if (beanName.equals(agentName)) {
+                    log.info("[benxin] Agent [{}] 使用同名 bean 作为 {}", agentName, type.getSimpleName());
+                    return beanFactory.getBean(beanName, type);
+                }
+            }
+        }
+        T unique = provider.getIfUnique();
+        if (unique != null) {
+            return unique;
+        }
+        List<String> candidates = new ArrayList<>();
+        provider.orderedStream().forEach(bean -> candidates.add(String.valueOf(bean)));
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        throw new LlmAgentInvocationException("[benxin] 容器里有 " + candidates.size() + " 个 " + type.getSimpleName()
+                + " bean，无法为 Agent [" + agentName + "] 决定用哪一个。"
+                + "请把其中一个的 bean 名起成 Agent 名（" + agentName + "），或给其中一个加 @Primary。当前候选: "
+                + candidates);
     }
 
     /** 实例化注解上声明的拦截器：优先取容器里的 bean，取不到再直接 new。 */

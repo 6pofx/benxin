@@ -241,6 +241,11 @@ public class DefaultAgent implements Agent {
         Map<String, Object> attributes = seedAttributes == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(seedAttributes);
+        // 会话 id 与 Agent 名本来就"人人都有"，但以前它们不在属性表里 ——
+        // 于是按 AgentAttributes.SESSION_ID / AGENT_NAME 取值永远是 null。
+        // 这里在运行开始时播种一次（调用方显式放的值优先，不覆盖）。
+        attributes.putIfAbsent(AgentAttributes.SESSION_ID, sessionId);
+        attributes.putIfAbsent(AgentAttributes.AGENT_NAME, name());
         AgentInvocation invocation = new AgentInvocation(name(), sessionId, spec, input, history, attributes);
         List<AgentInterceptor> active = activeInterceptors();
 
@@ -339,7 +344,12 @@ public class DefaultAgent implements Agent {
                 .approvalHandler(approvalHandler)
                 .approvalPolicy(approvalPolicy)
                 .hardMaxSteps(hardMaxSteps)
-                .toolExecutor(toolExecutor);
+                .toolExecutor(toolExecutor)
+                // 监听器必须一起带上：派生副本的运行同样要进统计/审计/子代理记账。
+                // 以前这里漏了 `.listener(...)`，于是"换个模型试试"派生出的副本
+                // 会静默绕过所有可观测性（而且每派生一层就再丢一次）。
+                // CompositeListener 在 build() 时会被摊平，所以这里直接交给它即可。
+                .listener(listener);
         interceptors.forEach(b::interceptor);
         subAgents.forEach(b::subAgent);
         return b;

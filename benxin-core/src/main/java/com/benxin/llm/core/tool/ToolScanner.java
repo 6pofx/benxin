@@ -1,5 +1,6 @@
 package com.benxin.llm.core.tool;
 
+import com.benxin.llm.core.annotation.LlmRetry;
 import com.benxin.llm.core.annotation.LlmTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,7 +56,19 @@ public final class ToolScanner {
                 log.debug("跳过无返回值的工具方法 {}", method);
                 continue;
             }
-            callbacks.add(new MethodToolCallback(bean, method));
+            ToolCallback callback = new MethodToolCallback(bean, method);
+            LlmRetry retry = method.getAnnotation(LlmRetry.class);
+            if (retry == null) {
+                retry = type.getAnnotation(LlmRetry.class);
+            }
+            if (retry != null) {
+                // 方法上的 @LlmRetry 以前没有任何消费点（打了等于没打）。这里把它落到工具执行层。
+                callback = new RetryingToolCallback(callback, retry.maxAttempts(),
+                        retry.backoffMillis(), retry.multiplier());
+                log.debug("工具 [{}] 启用重试：最多 {} 次，首次退避 {}ms，倍数 {}",
+                        callback.name(), retry.maxAttempts(), retry.backoffMillis(), retry.multiplier());
+            }
+            callbacks.add(callback);
         }
         return callbacks;
     }

@@ -36,8 +36,8 @@ import java.util.Optional;
 @LlmLoop("plan-execute")
 public class PlanExecuteLoop extends AbstractAgentLoop {
 
-    /** 计划在 {@code ctx.attributes()} 中的键名。 */
-    public static final String PLAN_ATTRIBUTE = "benxin.plan";
+    /** 计划在 {@code ctx.attributes()} 中的键名（与 {@code AgentAttributes.PLAN} 同源）。 */
+    public static final String PLAN_ATTRIBUTE = com.benxin.llm.core.agent.AgentAttributes.PLAN;
 
     /** 即使模型一直在调工具，每经过这么多轮也回显一次进度，防止长任务跑偏。 */
     private static final int PROGRESS_EVERY_ROUNDS = 3;

@@ -12,12 +12,43 @@ public interface ApprovalHandler {
 
     boolean approve(ApprovalRequest request);
 
+    /**
+     * 判定一次审批，返回带理由的结论。
+     *
+     * <p>默认实现把 {@link #approve} 的布尔值包成结论（拒绝时没有理由），
+     * 因此只实现 {@code approve} 的既有代码行为完全不变。想在拒绝时告诉模型
+     * "为什么不行"（例如"写文件需先说明目标路径"）的实现覆写本方法即可。</p>
+     */
+    default ApprovalDecision decide(ApprovalRequest request) {
+        return approve(request) ? ApprovalDecision.allow() : ApprovalDecision.denied(null);
+    }
+
     static ApprovalHandler autoApprove() {
         return request -> true;
     }
 
     static ApprovalHandler denyAll() {
         return request -> false;
+    }
+
+    /**
+     * 审批结论。
+     *
+     * <p>注意静态工厂叫 {@link #allow()} 而不是 {@code approved()}：记录组件 {@code approved}
+     * 已经占用了同签名的访问器方法名。</p>
+     *
+     * @param approved 是否放行
+     * @param reason   拒绝理由，会原样拼进回传给模型的工具错误文本；无理由时为 {@code null}
+     */
+    record ApprovalDecision(boolean approved, String reason) {
+
+        public static ApprovalDecision allow() {
+            return new ApprovalDecision(true, null);
+        }
+
+        public static ApprovalDecision denied(String reason) {
+            return new ApprovalDecision(false, reason);
+        }
     }
 
     /**

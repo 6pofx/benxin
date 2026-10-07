@@ -42,13 +42,13 @@ public class LlmAgentAutoConfiguration {
                                            ContextManager contextManager,
                                            MemoryStore memoryStore,
                                            SystemPromptProvider systemPromptProvider,
-                                           ToolSandbox sandbox,
-                                           ApprovalHandler approvalHandler,
+                                           ObjectProvider<ToolSandbox> sandboxes,
+                                           ObjectProvider<ApprovalHandler> approvalHandlers,
                                            AgentRegistry agentRegistry,
                                            ObjectProvider<LlmInterceptorChain> interceptorChains,
                                            ObjectProvider<AgentListener> listeners) {
         return new LlmAgentFactory(properties, modelRegistry, loopRegistry, toolCatalog,
-                contextManager, memoryStore, systemPromptProvider, sandbox, approvalHandler,
+                contextManager, memoryStore, systemPromptProvider, sandboxes, approvalHandlers,
                 agentRegistry, interceptorChains, listeners);
     }
 }

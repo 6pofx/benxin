@@ -30,7 +30,10 @@ public interface TokenEstimator {
                 other++;
             }
         }
-        return cjk + Math.max(1, other / 4);
+        // 非 CJK 部分按 4 字符 1 token 向上取整：只有 0 个非 CJK 字符时才不加这 1 ——
+        // 以前的 Math.max(1, other / 4) 会让纯中文多算 1 个 token，
+        // 于是"刚好卡在压缩阈值上"的判断会偏移。
+        return cjk + (other + 3) / 4;
     }
 
     /** 估算一组消息的 token 数（含每条消息约 4 token 的角色/分隔开销）。 */

@@ -28,6 +28,16 @@ public class SelectiveInterceptor implements AgentInterceptor {
         this.agents = guard == null ? Set.of() : Set.copyOf(Arrays.asList(guard.agents()));
     }
 
+    /** 被包装的原始拦截器（以前拿不到它，链上出现过什么就只能靠日志猜）。 */
+    public AgentInterceptor delegate() {
+        return delegate;
+    }
+
+    /** 限定生效的 Agent 名；空集表示"不做限制，交给 delegate 自己的 supports 判断"。 */
+    public Set<String> agents() {
+        return agents;
+    }
+
     @Override
     public int order() {
         return delegate.order();

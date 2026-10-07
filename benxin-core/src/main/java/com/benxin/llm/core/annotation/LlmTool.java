@@ -36,4 +36,23 @@ public @interface LlmTool {
 
     /** 是否启用；便于灰度或踩刹车。 */
     boolean enabled() default true;
+
+    /**
+     * 是否需要在执行前征求人工审批。
+     *
+     * <p>写库、发消息、调用外部系统一类有副作用的注解工具应当设为 {@code true}
+     * （等价于手写 {@code ToolCallback} 覆写 {@code requiresApproval()}）。</p>
+     *
+     * <p>类上与方法上都标注时取"安全侧"：任一处为 {@code true} 即为 {@code true}。</p>
+     */
+    boolean requiresApproval() default false;
+
+    /**
+     * 同一轮里多个工具调用是否可以并行执行。
+     *
+     * <p>默认 {@code true}。有副作用或依赖共享状态的工具应设为 {@code false} 以串行执行。</p>
+     *
+     * <p>类上与方法上都标注时取"安全侧"：任一处为 {@code false} 即为 {@code false}。</p>
+     */
+    boolean parallelSafe() default true;
 }

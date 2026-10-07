@@ -75,8 +75,33 @@ public class AgentRegistry {
         return Collections.unmodifiableSet(all);
     }
 
+    /**
+     * <b>已解析</b>的 Agent 快照 —— 注意它<b>不是</b>"全部已注册的 Agent"。
+     *
+     * <p>惰性登记（{@code @LlmAgent} 接口）的条目只在第一次被 {@link #find(String)} / {@link #get(String)}
+     * 触达时才构建并进入这里，因此"从未被调用过"的 Agent 不在返回值里，但它在
+     * {@link #names()} 里。想遍历全部 Agent（例如清空所有会话历史）请用：
+     * {@code names().forEach(n -> find(n).ifPresent(...))}，或先调 {@link #eager()} /
+     * {@link #resolveAll()} 再读本方法。</p>
+     *
+     * <p>以前这个方法没有任何 javadoc，看起来像"全量"，于是诊断/清理代码会静默地什么都不做。</p>
+     */
     public synchronized Map<String, Agent> resolved() {
         return Collections.unmodifiableMap(new LinkedHashMap<>(agents));
+    }
+
+    /**
+     * 解析<b>全部</b>已注册的 Agent（含惰性条目）并返回名 → Agent 的映射。
+     *
+     * <p>与 {@link #eager()} 的区别：{@code eager()} 只预构建、失败时打 WARN 并继续；
+     * 本方法把失败如实抛出，适合"我需要一个确定的全量表"的场景。</p>
+     */
+    public synchronized Map<String, Agent> resolveAll() {
+        Map<String, Agent> all = new LinkedHashMap<>();
+        for (String name : names()) {
+            find(name).ifPresent(agent -> all.put(name, agent));
+        }
+        return Collections.unmodifiableMap(all);
     }
 
     public synchronized boolean isEmpty() {

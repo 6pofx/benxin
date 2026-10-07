@@ -152,16 +152,16 @@ public class MyService {
 | 注解 | 位置 | 作用 |
 |---|---|---|
 | `@LlmAgent` | 接口 | 把接口变成可注入的 Agent；方法调用 = 一次 Agent 运行 |
-| `@LlmLoop("name")` | 类 | 注册一个自定义 Agent 循环（**无需再补 `@Component`**，主包下会被自动发现） |
+| `@LlmLoop("name")` | 类 | 注册一个自定义 Agent 循环（**无需再补 `@Component`**，主包下会被自动发现）；`defaultLoop = true` 时在没有显式配置 `llm.agent.default-loop` 的情况下成为默认 Loop，多个候选按 `order()` 取最小者 |
 | `@LlmModelDef("name")` | 类 | 用指定名字注册一个 `LlmModel` bean |
-| `@LlmTool` | 方法/类 | 把方法暴露给模型调用 |
-| `@LlmToolParam` | 参数 | 描述工具参数的名称/说明/是否必填/默认值 |
+| `@LlmTool` | 方法/类 | 把方法暴露给模型调用；`requiresApproval = true` 要求人工审批，`parallelSafe = false` 要求串行执行（类与方法都标注时取**安全侧**） |
+| `@LlmToolParam` | 参数 | 描述工具参数的名称/说明/是否必填/默认值。**`required = true` 且无默认值时运行期会真的校验**：模型漏参会被回灌"缺少必填参数 [x]"；`Optional<T>` 参数一律视为可缺省 |
 | `@SystemPrompt` | 方法 | 方法级系统提示词，支持 `{变量}` 插值（可引用 `@User` 参数与 `@Ctx` 变量） |
 | `@User` / `@Assistant` | 参数 | 指定参数作为 user / assistant 消息（**无注解参数默认即 user**） |
 | `@Ctx("name")` | 参数 | 上下文变量：只参与提示词渲染与运行属性，不进消息体 |
 | `@Memory` | 参数 | 参数值作为 sessionId，自动装载/保存会话历史 |
 | `@LlmGuard` | 类 | 声明式注册拦截器，可限定只对某些 Agent 生效（同样无需 `@Component`） |
-| `@LlmRetry` | 方法/类 | 声明重试策略 |
+| `@LlmRetry` | 方法/类 | 声明重试策略：**工具方法上**=重试该工具的执行；**Agent 接口（或其方法）上**=重试模型调用，`includeTools = true` 时把该 Agent 的全部工具也包上重试 |
 | `@EnableLlmAgents` | 配置类 | **必写**：开启 `@LlmAgent` 接口扫描；不写 `basePackages` 时从主应用包推断 |
 
 > ⚠️ `@EnableLlmAgents` 是**必须**的。starter 里没有任何自动配置会帮忙扫描 `@LlmAgent` 接口 ——
@@ -665,6 +665,27 @@ public class DevTools {
 参数支持基本类型、枚举、集合、`Optional`、自定义 POJO（自动生成嵌套 JSON Schema 并绑定）。
 返回 `String` / DTO（自动序列化）/ `ToolResult`（需要自己控制错误标记时）。
 
+三件以前只能靠"手写 `ToolCallback`"才能表达的事，现在注解上就有：
+
+```java
+@LlmTool(name = "create_order", description = "下单", requiresApproval = true, parallelSafe = false)
+@LlmRetry(maxAttempts = 3, backoffMillis = 200)      // 工具执行失败时按退避重试
+public String create(@LlmToolParam("sku") String sku,
+                     @LlmToolParam(value = "note", required = false) Optional<String> note,
+                     ToolContext ctx) { ... }
+```
+
+| 写法 | 语义 |
+|---|---|
+| `requiresApproval = true` | 与手写 `ToolCallback#requiresApproval()` 等价：`ApprovalPolicy.ON_REQUEST`（默认）下会先问审批 |
+| `parallelSafe = false` | 同一轮里多个工具调用串行执行（有副作用、依赖共享状态的工具必须这么写） |
+| `@LlmRetry` | 只重试"失败结果"（`ToolResult.error`）；参数类确定性错误不重试；重试次数耗尽后返回最后一次结果 |
+| `AgentSession session` 参数 | 由框架注入**真实会话句柄**（`id()` / `history()` / `chat()` / `attributes()`），不再像 1.1.0 那样恒为 `null` |
+| `ToolContext ctx` 参数 | 由框架注入执行上下文（`sessionId()` / `attributes()` / `sandbox()` / `spawn(...)`） |
+
+`defaultValue` 生成的 schema `default` 会按参数类型转换（`integer` → 数字、`boolean` → 布尔、`array`/`object` → 解析 JSON），
+不再恒为字符串；POJO 展开深度超限时也只截断"对象展开"，标量字段保留自己的类型。
+
 ### 程序化方式
 
 ```java
@@ -859,11 +880,23 @@ r.attributes();    // 循环写入的统计信息
 |---|---|
 | 模型声明 `capabilities().streaming == false` | `LoopContext.callModel` 改走 **`chat()` 同步分支**（因此自定义传输层只实现 `post()` + `decode()` 也能在 Agent 路径上跑通）；支持流式的仍走 `stream()` |
 | 自定义传输层在 `postStreaming()` 里返回非流式响应 | 得到一条可读的 `ModelException`（提示必须返回 `TransportResponse.streaming(...)`），而不是 `SseParser` 里的 NPE |
+| 网关把 SSE 缓冲成整包（`200` + `application/json`） | 1.1.1 起同样得到可读的 `ModelException`。此前 `postStreaming` 只看状态码，整包被当成事件流，解析出 0 个事件 → 上层拿到**静默空回答** |
 | 流式重试 | `onStart` 在一次 `stream()` 调用内**恰好一次**，重试不会让订阅方被重新初始化；已经吐出内容后不再重试 |
+| 一次失败的运行 | `AgentListener#onError` **只广播一次**（1.1.0 会广播两次：Loop 与 Agent 各一次，按异常计数/告警的监听器会翻倍） |
+| 工具调用五道关卡的顺序 | **沙箱 → 审批 → 拦截器 beforeTool → 执行 → 截断/afterTool**。因此拦截器只看得见"通过了沙箱"的调用（要审计全部调用请用 `AgentListener`） |
+| `beforeTool` 返回非 null 短路 | 只是跳过**执行**：链上其余拦截器仍会收到 `beforeTool` 与 `afterTool`（第一个非 null 的结果生效） |
+| 审批被拒时的文本 | `用户拒绝执行工具 [名字]：<理由>`；覆写 `ApprovalHandler#decide(...)` 就能把理由告诉模型 |
+| `ApprovalPolicy.ON_FAILURE` | 先执行；**执行失败**后再问一次，批准则重试一次。沙箱拒绝是硬边界，任何策略都覆盖不了 |
+| `AgentRegistry.resolved()` | 只含**已解析**的 Agent（惰性条目要 first-call 才进来）；全量请用 `names()` + `find()`，或新加的 `resolveAll()` |
+| 运行属性里的 `benxin.sessionId` / `benxin.agentName` | 1.1.1 起由 `DefaultAgent.run` 在运行开始时播种（此前这两个常量按名取值永远是 null） |
+| `agent.toBuilder()` | 携带监听器；`.model("名字")` / `.loop("名字")` 与实例形式之间是**后设者胜**（1.1.0 是实例恒胜，名字被静默忽略） |
 | 子代理用量 | 补记进父上下文（`AgentResult.usage()` 含子代理消耗），并广播平台级 `subagent_start/end`；claude-code 另有 `claude-code.subagent-start/end` |
 | claude-code 兜底系统提示词 | 幂等：历史里已有同一段提示时不再重复注入（开记忆也不会线性累积） |
 | `ModelRegistry.defaultName()` / `defaultModel()` | 两者口径一致：配置的默认名取不到时都回退到**按注册顺序的第一个**模型（`LinkedHashMap`，结果稳定）；想拿"配置里原样写的名字"用 `configuredDefaultName()` |
 | 工作流预算中断 | `AgentResult.maxStepsReached()` 为 `true`，且 `WorkflowRun.truncated()` 为 `true`（两者不再矛盾） |
+| END 节点的出边 | 永远不会被执行（引擎在 END 处结束推进）→ 加载期打一条 WARN，见下 |
+| 默认 Loop | `llm.agent.default-loop`（显式配置）→ `@LlmLoop(defaultLoop = true)`（多个候选按 `order()` 取最小）→ `dsh-minimal` |
+| `@LlmLoop` / `@LlmGuard` 的扫描范围 | 按**主应用包**扫类路径，**不区分** `src/main` 与 `src/test`：写在主包下的测试夹具会进生产上下文（`@SpringBootTest` 里表现为"多出一堆 Loop/拦截器"）。测试夹具请放到主应用包之外 |
 
 ### HTTP 端点（需显式开启）
 
@@ -879,8 +912,8 @@ llm:
 | `GET` | `/llm/agents` | 列出全部 Agent 及其 loop / model / 工具 |
 | `GET` | `/llm/loops` | 列出全部 Loop |
 | `GET` | `/llm/models` | 列出全部模型 |
-| `POST` | `/llm/agents/{name}/chat` | 同步对话 |
-| `GET` | `/llm/agents/{name}/stream` | SSE 流式（`delta` / `thinking` / `tool_call` / `done` / `error`） |
+| `POST` | `/llm/agents/{name}/chat` | 对话：**默认 JSON**；该 Agent 打开了流式（`@LlmAgent(stream = true)` 或 `llm.agent.stream=true`）时返回 **SSE** |
+| `GET` | `/llm/agents/{name}/stream` | SSE 流式（`delta` / `thinking` / `tool_call` / `done` / `error`），响应头带 `charset=UTF-8` |
 
 **端点的实际契约**（这些是"按直觉猜会猜错"的部分，写在这里免得只能读源码）：
 
@@ -892,6 +925,8 @@ llm:
 | 方法级 `@SystemPrompt` / `@Ctx` / `@User` | 在 HTTP 端点上生效 | **完全不生效**：端点按 Agent 名调用，不经过方法绑定，只认 Agent 级 `systemPrompt` |
 | 运行失败 | 也会留一条记录 | 失败路径只广播 `onError`，**不产生** `agent_run` 行（需要在监听器里自行处理 `onError`） |
 | SSE 事件里的 `tool_result` | 存在 | **不存在**：`LlmStreamHandler` 没有对应回调；工具结果只在 `done` 事件的 `toolCalls` 里 |
+| SSE 里的中文 | 直接读就正常 | 响应头声明 `charset=UTF-8`（1.1.1 起）。此前 Spring 的 `StringHttpMessageConverter` 会按 ISO-8859-1 解码，中文必乱码 |
+| `llm.agent.stream=true` | 让 `/chat` 变流式 | 1.1.1 起**确实如此**；此前是死配置（写与不写完全一样） |
 
 > 默认关闭是刻意的：这是一个能触发模型调用、并可能间接驱动本地工具执行的入口，
 > 不应该因为"引了依赖"就自动对外。开启前请自行加鉴权。
@@ -1040,7 +1075,44 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 
 ## 版本与升级
 
-当前版本 **1.1.0**（上一个发布版本是 `v1.0.0`）。
+当前版本 **1.1.1**（上一个发布版本是 `v1.1.0`）。
+
+### 1.1.1：31 条实测缺陷修复
+
+由独立示例工程 `benxin_exp`（14 个模块、789 个用例）在 1.1.0 上逐条实测上报，
+修复覆盖"**配置写了不生效**"与"**静默错到底**"两类问题：
+
+| 组 | 修了什么 |
+|---|---|
+| **注解不再形同虚设** | `@LlmRetry` 真正生效（模型调用层 + 工具执行层，`includeTools` 控制是否连工具一起包）；`@LlmAgent(stream = true)` / `llm.agent.stream` 真正让 `/chat` 走 SSE；`@LlmLoop(defaultLoop = true)` 真的能成为默认 Loop，多个候选按 `order()` 取最小；`@LlmTool` 新增 `requiresApproval` / `parallelSafe` |
+| **工具链路** | `@LlmToolParam(required = true)` 运行期真的校验（缺参回灌"缺少必填参数 [x]"）；`@LlmTool` 方法的 `AgentSession` 参数注入**真实会话句柄**（不再恒为 `null`）；`beforeTool` 短路不再 `break` 掉整条拦截器链；`@LlmAgent(tools = 外层类.class)` 能匹配到写在内部类里的手写 `ToolCallback`；schema 的 `default` 按类型转换、深度截断不再把标量降级成 `object` |
+| **传输与 Web** | 流式路径收到 `200 + 非 SSE 整包` 时报可读错，不再静默返回空回答；SSE 端点声明 `charset=UTF-8`（中文不再乱码）；审批被拒时能把**理由**告诉模型（新增 `ApprovalHandler.ApprovalDecision` / `decide`） |
+| **可观测性** | 同一次失败的 `onError` 只广播一次（此前 Loop 与 Agent 各发一次）；`SelectiveInterceptor` 暴露 `delegate()`；`AgentAttributes` 的 `SESSION_ID` / `AGENT_NAME` 真的被播种，其余常量与实现同源；`AgentRegistry.resolved()` 语义写清并新增 `resolveAll()`；注册器重复执行不再产生 `name#1` 影子 bean |
+| **装配与覆盖** | `ToolSandbox` / `ApprovalHandler` 改为 `ObjectProvider` 注入：bean 名 = Agent 名优先，多实现不再直接启动失败；`AgentBuilder.model/loop` 的实例与名字之间改为**后设者胜**；`toBuilder()` 携带监听器 |
+| **工作流** | END 节点的出边在加载期给出 WARN（此前是纯静默死代码）；`WorkflowIo` 把 flow 风格 YAML 被当成 JSON 的报错说清楚，并新增 `llm.workflows.<key>.format: yaml` |
+| **上下文与记忆**（1.1.1 上半场） | `SlidingWindowCompactor` 重写：`keepRecent` 是**下限**（不再压缩到只剩 1 条、也不丢摘要）；压缩预算与 `ContextManager` 共用同一口径；`TokenEstimator` 对纯中文不再多算 1；`withText` 对工具消息是**替换**且保留 `error` / `toolUseId`；条件表达式里的 `${x:-兜底}` 真正生效 |
+
+### ⚠️ 1.0.0 → 1.1.1 升级注意
+
+**1.1.0 的行为变更**见上一节表格。**1.1.1 追加的行为变更**（同样朝"少一点静默"的方向，但会改变既有项目的可观测行为）：
+
+| 位置 | 1.1.0 | 1.1.1 |
+|---|---|---|
+| `@LlmToolParam(required = true)` 的参数缺失 | 静默回落 `null` / `0` / `false` | **回灌 `缺少必填参数 [x]`**，工具不被执行 |
+| `Optional<T>` 参数 | 出现在 schema 的 `required` 里 | **不再算必填**（类型本身已表达"可缺省"） |
+| `@LlmTool` 方法的 `AgentSession` 参数 | 恒为 `null` | **注入真实会话句柄**；上下文不提供句柄时明确报错 |
+| 失败的运行 | `onError` 广播 2 次 | **1 次**（只有最外层 `DefaultAgent.run` 广播） |
+| `@LlmAgent(stream = true)` / `llm.agent.stream=true` | 无任何效果 | **`/chat` 返回 SSE**；不想要就关掉这个开关 |
+| `llm.agent.default-loop` 的默认值 | `"dsh-minimal"`（导致注解永远无效） | **留空**（"没配"与"配了 dsh-minimal"区分开），回落链见上 |
+| `ApprovalPolicy.ON_FAILURE` | 只覆盖沙箱拒绝（等于把沙箱降级） | 沙箱拒绝**不可覆盖**；改为**执行失败**后问一次、批准重试一次 |
+| `AgentBuilder.model(LlmModel)` 后再 `.model("名字")` | 实例恒胜（名字静默无效） | **后设者胜**（沿用 README 一直承诺的语义） |
+| `Agent.interceptors` 里 `beforeTool` 短路 | 后续拦截器完全收不到这次调用 | 后续拦截器仍收到 `beforeTool` / `afterTool`，第一个非空结果生效 |
+| `LlmAgentFactory` 构造签名 | `ToolSandbox` / `ApprovalHandler` 裸类型 | `ObjectProvider<...>`；**直接 new 过它的代码需要改**（容器装配不受影响） |
+| `ToolContext` | 无 `session()` | 新增 `default Optional<AgentSession> session()`（**自定义实现无需改动**，默认返回空） |
+| `ApprovalHandler` | 只有 `approve()` | 新增 `default decide()` + `ApprovalDecision` 记录（**已有实现无需改动**） |
+| 注册器重复执行 | 产生 `name#1`，随后 `getBean(接口.class)` 抛 `NoUniqueBeanDefinitionException` | **跳过重复项 + WARN** |
+| `WorkflowIo` 解析 | flow 风格 YAML 报"非法 JSON" | 报错说明"这是 YAML 的 flow 风格"并给出改法 |
+| `llm.workflows.<key>.format` | 不存在 | 新增（`auto` / `yaml` / `json`） |
 
 ### 1.1.0 新增
 
@@ -1094,6 +1166,28 @@ mvn -o test
 
 **244 个测试全部通过**（benxin-core 191 / starter 39 / examples 14，共 19 个测试类），
 全部离线、不消耗 token：
+
+### 1.1.1 的验证方式
+
+| 层 | 手段 | 结果 |
+|---|---|---|
+| 单元 / 装配 | 本仓库 244 个离线用例 | 全绿 |
+| 集成 | 独立工程 `benxin_test`（9 个模块、494 个用例，含真实 Spring 上下文、H2、HTTP 端点） | 全绿 |
+| **真实模型端到端** | LM Studio 上的 `qwen/qwen3-vl-8b`（OpenAI 兼容端点），走 **core 层**（流式增量 / 工具调用 / 必填参数回灌 / `AgentSession` 注入）与 **Spring HTTP 层**（`/chat`、`/stream`、SSE 字节级 charset、审批拒绝理由回灌） | 见下 |
+
+真实模型这一轮的实测结论（本地小模型反而更能暴露"静默失效"类问题）：
+
+```
+流式：拿到真实增量、onStart/onComplete 各恰好一次
+工具：模型按 schema 调用 get_weather(city=北京) → 执行成功 → 回答里带出 21℃
+必填：args={} → "缺少必填参数 [city]，请补齐后重试"
+会话：工具方法里的 AgentSession 拿到 lms-session-42（不再是 null）
+Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream; charset=UTF-8
+     GET  /stream  → Content-Type: text/event-stream;charset=UTF-8（字节级确认是 UTF-8，中文不乱码）
+审批：requiresApproval=true 的工具被拒 → done 事件里
+     result="用户拒绝执行工具 [delete_file]：演示环境禁止删除文件，请改为只读操作"
+     模型据此改写回答，把理由原样告诉了用户
+```
 
 | 测试类 | 数量 | 覆盖 |
 |---|---|---|

@@ -119,11 +119,51 @@ public final class Conditions {
         }
     }
 
-    /** 显式引用 {@code ${path}}。 */
+    /**
+     * 显式引用 {@code ${path}}（可带默认值 {@code ${path:-兜底}}）。
+     *
+     * <p>{@code :-} 的拆分与 {@link Templates#render} 保持同一套语义：取不到就用兜底值。
+     * 以前这里把整串 {@code x:-0} 当成变量名去查表 → 查到 null →
+     * 比较恒为假、<b>不报错也不警告</b>，那条边永远不成立（真实的静默死分支）。</p>
+     *
+     * <p>兜底值按"字面量"解析（数字 / true / false / null / 其余当字符串），
+     * 因此 {@code ${x:-0} <= 2} 是数值比较、{@code ${x:-false}} 也能当真值用。</p>
+     */
     private record RefValue(String path) implements Value {
         @Override
         public Object get(Function<String, Object> lookup) {
-            return Templates.resolve(path, lookup);
+            String raw = path;
+            String fallback = null;
+            int separator = raw.indexOf(":-");
+            if (separator >= 0) {
+                fallback = raw.substring(separator + 2).trim();
+                raw = raw.substring(0, separator);
+            }
+            Object found = Templates.resolve(raw.trim(), lookup);
+            if (found != null) {
+                return found;
+            }
+            return fallback == null || fallback.isEmpty() ? null : coerceLiteral(fallback);
+        }
+    }
+
+    /** 把兜底字符串按字面量解析：数字 / true / false / null 优先，其余保持字符串。 */
+    private static Object coerceLiteral(String text) {
+        String normalized = normalize(text);
+        switch (normalized) {
+            case "true", "yes", "是" -> {
+                return Boolean.TRUE;
+            }
+            case "false", "no", "否" -> {
+                return Boolean.FALSE;
+            }
+            case "null", "nil" -> {
+                return null;
+            }
+            default -> {
+                Object number = tryNumber(text);
+                return number != null ? number : text;
+            }
         }
     }
 

@@ -39,6 +39,17 @@ public interface ToolContext {
     /** 向监听器发一个自定义事件。 */
     void emit(String type, Object payload);
 
+    /**
+     * 当前会话句柄，供工具读写会话级信息（{@code id()} / {@code history()} / {@code chat()}）。
+     *
+     * <p>声明了 {@link com.benxin.llm.core.agent.AgentSession} 参数的 {@code @LlmTool} 方法
+     * 由框架用这里的返回值填充。默认返回空，表示该实现不提供句柄 —— 此时插件会明确报错，
+     * 而不是像以前那样静默注入 {@code null}。</p>
+     */
+    default Optional<com.benxin.llm.core.agent.AgentSession> session() {
+        return Optional.empty();
+    }
+
     /** 是否具备派生子代理的能力（取决于 Agent 是否配置了 subAgents）。 */
     default boolean canSpawnSubAgent() {
         return false;

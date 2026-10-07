@@ -26,7 +26,8 @@ import java.util.Set;
  * 把 Java 反射信息翻译成 JSON Schema，供 {@code @LlmTool} 方法自动生成工具声明。
  *
  * <p>覆盖三种协议共通的 JSON Schema 子集：{@code object / array / string / number /
- * integer / boolean / enum}。POJO 会递归展开，深度超过 {@value #MAX_DEPTH} 时退化成自由对象，
+ * integer / boolean / enum}。POJO 会递归展开，深度超过 {@value #MAX_DEPTH} 时只声明
+ * {@code {"type": "object"}} 而不再展开字段（标量不受深度限制，永远保留自己的类型），
  * 避免自引用类型把 schema 撑爆。</p>
  */
 public final class JsonSchemaGenerator {
@@ -55,11 +56,10 @@ public final class JsonSchemaGenerator {
                 propertySchema.put("description", annotation.description());
             }
             if (annotation != null && !annotation.defaultValue().isBlank()) {
-                propertySchema.put("default", annotation.defaultValue());
+                putDefault(propertySchema, annotation.defaultValue());
             }
             properties.set(name, propertySchema);
-            boolean isRequired = annotation == null || annotation.required();
-            if (isRequired && (annotation == null || annotation.defaultValue().isBlank())) {
+            if (isRequired(parameter)) {
                 required.add(name);
             }
         }
@@ -70,10 +70,64 @@ public final class JsonSchemaGenerator {
         return schema;
     }
 
+    /**
+     * 按 schema 的 {@code type} 转换注解里的字符串默认值。
+     *
+     * <p>注解值只能是 String，直接塞进去会让 {@code integer} 属性同时出现
+     * {@code "type": "integer"} 与 {@code "default": "200"}，严格模式（structured outputs）
+     * 的上游会判定类型不匹配，模型也可能照着把数字当字符串传。</p>
+     *
+     * <p>注解值写错（例如给 integer 配 {@code "abc"}）时不抛异常，退回原始字符串，
+     * 至少让模型看得到作者意图。</p>
+     */
+    private static void putDefault(ObjectNode propertySchema, String raw) {
+        String type = propertySchema.path("type").asText("");
+        try {
+            switch (type) {
+                case "integer" -> propertySchema.put("default", Long.parseLong(raw.trim()));
+                case "number" -> propertySchema.put("default", Double.parseDouble(raw.trim()));
+                case "boolean" -> propertySchema.put("default", parseBooleanDefault(raw));
+                case "array", "object" -> propertySchema.set("default", Json.parse(raw));
+                default -> propertySchema.put("default", raw);
+            }
+        } catch (RuntimeException e) {
+            propertySchema.put("default", raw);
+        }
+    }
+
+    private static boolean parseBooleanDefault(String raw) {
+        String value = raw.trim();
+        if (!value.equalsIgnoreCase("true") && !value.equalsIgnoreCase("false")) {
+            throw new IllegalArgumentException("不是布尔字面量: " + raw);
+        }
+        return Boolean.parseBoolean(value);
+    }
+
     /** 判断某个参数类型是否由框架注入而非模型提供。 */
     public static boolean isInjected(Class<?> type) {
         return ToolContext.class.isAssignableFrom(type)
                 || com.benxin.llm.core.agent.AgentSession.class.isAssignableFrom(type);
+    }
+
+    /**
+     * 参数是否必填。
+     *
+     * <p>schema 生成与运行期校验共用这一份判断，避免出现"schema 说必填、执行时却不检查"
+     * 这种两处口径漂移（模型漏参就会一路走到业务代码里变成 NPE）。</p>
+     *
+     * <p>以下情况不算必填：框架注入参数（{@link ToolContext} / {@code AgentSession}）、
+     * {@code Optional<T>} 类型（类型本身就表达了"可缺省"）、以及配了 {@code defaultValue} 的参数。</p>
+     */
+    public static boolean isRequired(Parameter parameter) {
+        Class<?> type = parameter.getType();
+        if (isInjected(type) || Optional.class.isAssignableFrom(type)) {
+            return false;
+        }
+        LlmToolParam annotation = parameter.getAnnotation(LlmToolParam.class);
+        if (annotation == null) {
+            return true;
+        }
+        return annotation.required() && annotation.defaultValue().isBlank();
     }
 
     /** 解析参数名：注解优先，其次编译期保留的真实参数名（需要 {@code -parameters}），最后 argN。 */
@@ -105,10 +159,6 @@ public final class JsonSchemaGenerator {
     /** 为一个 Java 类型生成 schema。 */
     public static ObjectNode forType(Type type, int depth) {
         ObjectNode node = Json.object();
-        if (depth > MAX_DEPTH) {
-            node.put("type", "object");
-            return node;
-        }
         Class<?> raw = rawClass(type);
         if (raw == null) {
             return node; // 泛型变量等未知类型 -> 任意类型
@@ -150,6 +200,12 @@ public final class JsonSchemaGenerator {
             node.put("type", "string");
         } else {
             node.put("type", "object");
+            if (depth > MAX_DEPTH) {
+                // 超过深度上限就只声明"这是个对象"，不再展开字段。
+                // 这一步必须放在这里而不是方法开头：放在开头会连 String/int 这类标量
+                // 也被写成 type=object，等于把深层字段的类型信息全部抹掉。
+                return node;
+            }
             ObjectNode properties = node.putObject("properties");
             ArrayNode required = Json.array();
             for (Field field : fieldsOf(raw)) {

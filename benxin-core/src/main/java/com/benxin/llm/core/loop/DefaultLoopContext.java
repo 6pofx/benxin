@@ -2,6 +2,7 @@ package com.benxin.llm.core.loop;
 
 import com.benxin.llm.core.agent.AgentResult;
 import com.benxin.llm.core.agent.AgentInvocation;
+import com.benxin.llm.core.agent.AgentSession;
 import com.benxin.llm.core.agent.AgentSpec;
 import com.benxin.llm.core.agent.DefaultAgent;
 import com.benxin.llm.core.chat.ChatRequest;
@@ -64,6 +65,7 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
     private String lastText = "";
     private FinishReason finishReason = FinishReason.STOP;
     private boolean maxStepsReached;
+    private AgentSession sessionHandle;
 
     public DefaultLoopContext(DefaultAgent agent, AgentInvocation invocation, List<ChatMessage> messages,
                               String systemPrompt, LlmStreamHandler streamHandler,
@@ -154,6 +156,23 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
     @Override
     public LlmStreamHandler streamHandler() {
         return streamHandler;
+    }
+
+    /**
+     * 当前会话句柄：让工具方法能声明 {@code AgentSession} 参数并真的拿到可用对象
+     * （{@code id()} / {@code history()} / {@code chat()} / {@code attributes()}）。
+     *
+     * <p>同一个运行内返回同一个实例（惰性创建），并把本次运行的共享属性拷进句柄，
+     * 避免工具看到的属性表是空的。工具若直接调用 {@code chat()} 会另起一轮运行，
+     * 因此不会与当前运行的历史互相干扰。</p>
+     */
+    @Override
+    public synchronized java.util.Optional<AgentSession> session() {
+        if (sessionHandle == null) {
+            sessionHandle = agent.session(sessionId());
+            sessionHandle.attributes().putAll(attributes);
+        }
+        return java.util.Optional.of(sessionHandle);
     }
 
     // ---------- 状态 ----------
@@ -428,26 +447,32 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         // 以前这里在 ON_FAILURE 下会把沙箱拒绝交给审批 handler，配一个会批准的 handler
         // （插件默认 bean 正是 autoApprove）就等于把沙箱降级成了软约束。
         ToolSandbox.Decision decision = sandbox().check(call);
-        if (decision.denied()) {
-            result = decision.toToolResult();
-        } else if (needsApproval(call, callback)
-                && !approvalHandler().approve(new ApprovalHandler.ApprovalRequest(
-                        call.toolName(), call.arguments(), callback.description(), agentName(), sessionId()))) {
-            result = ToolResult.error("用户拒绝执行工具 [" + call.toolName() + "]");
+        ToolResult denial = decision.denied() ? decision.toToolResult() : approvalDenial(call, callback);
+        boolean executed = false;
+        if (denial != null) {
+            result = denial;
         } else {
             // 2. 拦截器短路
+            // 链上的每个拦截器都要收到这次调用：第一个非 null 的返回值胜出并跳过真正的执行，
+            // 但后面的拦截器仍然会被调用（否则"审计拦截器排在被短路调用之后"就永远看不到它），
+            // 这与紧跟着的 afterTool 广播（对所有拦截器）保持对称。
             result = null;
             for (AgentInterceptor interceptor : interceptors) {
                 ToolResult shortCircuit = interceptor.beforeTool(call);
-                if (shortCircuit != null) {
+                if (shortCircuit != null && result == null) {
                     result = shortCircuit;
-                    break;
                 }
             }
             // 3. 真正执行（带超时）
             if (result == null) {
                 result = executeWithTimeout(callback, call);
+                executed = true;
             }
+        }
+
+        // 3.5 ON_FAILURE：工具真的执行失败了，再问一次"要不要放行重试"
+        if (executed && result.error()) {
+            result = askAndRetry(call, callback, result);
         }
 
         long duration = (System.nanoTime() - start) / 1_000_000;
@@ -458,6 +483,27 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         }
         listener.onToolResult(call, result);
         return new ToolOutcome(toolMessage(call, result), ToolCallRecord.of(call, result, duration));
+    }
+
+    /**
+     * {@link ApprovalPolicy#ON_FAILURE}：工具<b>执行</b>失败后再问一次，批准就重试一次。
+     *
+     * <p>{@code ApprovalPolicy} 的 javadoc 一直承诺"执行失败后再询问是否放行重试"，
+     * 但实现里从来没有这条路径（旧代码只在沙箱拒绝时问过一次，那属于"不该执行"）。
+     * 这里把承诺补上，边界收在三点：只在真正执行过、结果是 error、且策略确为 ON_FAILURE 时才问；
+     * 最多重试一次 —— 人的点头不应该变成无限循环。</p>
+     */
+    private ToolResult askAndRetry(ToolInvocation call, ToolCallback callback, ToolResult failure) {
+        if (approvalPolicy() != ApprovalPolicy.ON_FAILURE) {
+            return failure;
+        }
+        ApprovalHandler.ApprovalDecision decision = approvalHandler().decide(
+                new ApprovalHandler.ApprovalRequest(call.toolName(), call.arguments(),
+                        "工具执行失败：" + failure.content(), agentName(), sessionId()));
+        if (!decision.approved()) {
+            return failure;
+        }
+        return executeWithTimeout(callback, call);
     }
 
     private ChatMessage toolMessage(ToolInvocation call, ToolResult result) {
@@ -492,6 +538,27 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
             case ON_REQUEST -> callback.requiresApproval();
             case ON_FAILURE -> false;
         };
+    }
+
+    /**
+     * 需要审批且被拒绝时返回回传给模型的错误结果，其余情况返回 {@code null}。
+     *
+     * <p>拒绝理由是 {@link ApprovalHandler.ApprovalDecision} 的一部分：以前这里写死
+     * "用户拒绝执行工具 [x]"，handler 没有任何渠道说明原因，模型只能盲猜着重试同一个调用。</p>
+     */
+    private ToolResult approvalDenial(ToolInvocation call, ToolCallback callback) {
+        if (!needsApproval(call, callback)) {
+            return null;
+        }
+        ApprovalHandler.ApprovalDecision approval = approvalHandler().decide(
+                new ApprovalHandler.ApprovalRequest(call.toolName(), call.arguments(),
+                        callback.description(), agentName(), sessionId()));
+        if (approval.approved()) {
+            return null;
+        }
+        String why = approval.reason();
+        return ToolResult.error("用户拒绝执行工具 [" + call.toolName() + "]"
+                + (why == null || why.isBlank() ? "" : "：" + why));
     }
 
     private static RuntimeException wrap(Throwable cause) {

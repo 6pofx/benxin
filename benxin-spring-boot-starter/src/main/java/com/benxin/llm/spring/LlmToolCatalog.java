@@ -99,7 +99,7 @@ public class LlmToolCatalog implements BeanPostProcessor {
         return global;
     }
 
-    /** 取指定类（含其实现的接口）上声明的工具。 */
+    /** 取指定类（含其实现的接口、以及它作为外层类的内部类）上声明的工具。 */
     public ToolRegistry forClasses(Class<?>[] classes) {
         DefaultToolRegistry registry = new DefaultToolRegistry();
         if (classes == null) {
@@ -111,13 +111,53 @@ public class LlmToolCatalog implements BeanPostProcessor {
                 tools = byDeclaredType.get(type);
             }
             if (tools == null) {
+                tools = nestedInside(type);
+                if (tools != null) {
+                    log.info("[benxin] @LlmAgent(tools = {}.class) 经外层类回退匹配到 {} 个工具（来源是它的内部类）",
+                            type.getSimpleName(), tools.size());
+                }
+            }
+            if (tools == null) {
                 log.warn("[benxin] @LlmAgent(tools = {}.class) 未匹配到任何工具，"
-                        + "请确认该类已交给 Spring 管理且方法上标注了 @LlmTool", type.getName());
+                                + "请确认该类已交给 Spring 管理且方法上标注了 @LlmTool；当前已知的工具来源类有 {}",
+                        type.getName(), snapshot().keySet().stream().map(Class::getName).toList());
                 continue;
             }
             tools.forEach(registry::register);
         }
         return registry;
+    }
+
+    /**
+     * 回退匹配：把"工具 bean 是所请求类的内部类"也算命中。
+     *
+     * <p>写类工具很常见的写法是 {@code @Bean ToolCallback}（返回外层类的内部类实例），
+     * 此时登记的来源类是 {@code OrderWriteTools$CreateOrderTool}，而
+     * {@code @LlmAgent(tools = OrderWriteTools.class)} 写的是外层类。
+     * 以前这里只做精确匹配，于是"一个工具都装不上、只留一行 WARN"。</p>
+     */
+    private List<ToolCallback> nestedInside(Class<?> outer) {
+        List<ToolCallback> matched = new ArrayList<>();
+        for (Map.Entry<Class<?>, List<ToolCallback>> entry : bySourceClass.entrySet()) {
+            if (isNestedIn(entry.getKey(), outer)) {
+                matched.addAll(entry.getValue());
+            }
+        }
+        for (Map.Entry<Class<?>, List<ToolCallback>> entry : byDeclaredType.entrySet()) {
+            if (!bySourceClass.containsKey(entry.getKey()) && isNestedIn(entry.getKey(), outer)) {
+                matched.addAll(entry.getValue());
+            }
+        }
+        return matched.isEmpty() ? null : List.copyOf(matched);
+    }
+
+    private static boolean isNestedIn(Class<?> candidate, Class<?> outer) {
+        for (Class<?> current = candidate; current != null; current = current.getEnclosingClass()) {
+            if (current.equals(outer)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 按工具名取工具；名字不存在时记录警告而不是抛异常。 */
@@ -140,7 +180,20 @@ public class LlmToolCatalog implements BeanPostProcessor {
 
     /** 手动登记工具（例如从 MCP 动态拉取或在 @Bean 里手工构造的）。 */
     public void register(ToolCallback callback) {
+        register(callback, callback.getClass());
+    }
+
+    /**
+     * 手动登记工具并显式指定"来源类"，让 {@code @LlmAgent(tools = X.class)} 能精确取到它。
+     *
+     * <p>动态生成的工具（MCP 桥接、匿名类、lambda）没有稳定的类名可依赖，
+     * 由调用方直接说明来源比让插件去猜更可靠。</p>
+     *
+     * @param sourceClass 来源类；为 {@code null} 时退回 {@code callback.getClass()}
+     */
+    public void register(ToolCallback callback, Class<?> sourceClass) {
         global.register(callback);
-        bySourceClass.computeIfAbsent(callback.getClass(), k -> new ArrayList<>()).add(callback);
+        Class<?> key = sourceClass == null ? callback.getClass() : sourceClass;
+        bySourceClass.computeIfAbsent(key, k -> new ArrayList<>()).add(callback);
     }
 }

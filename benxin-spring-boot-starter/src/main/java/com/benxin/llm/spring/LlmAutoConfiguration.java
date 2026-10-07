@@ -189,21 +189,42 @@ public class LlmAutoConfiguration {
         registerDeclaredWorkflows(registry, properties, resourceLoader);
 
         String annotatedDefault = null;
+        int annotatedOrder = Integer.MAX_VALUE;
+        List<String> competitors = new ArrayList<>();
         for (AgentLoop loop : loopBeans.orderedStream().toList()) {
             Class<?> targetClass = AopUtils.getTargetClass(loop);
             LlmLoop annotation = targetClass.getAnnotation(LlmLoop.class);
             String name = annotation != null && !annotation.value().isBlank() ? annotation.value() : loop.name();
             registry.register(name, loop);
-            if (annotation != null && annotation.defaultLoop() && annotatedDefault == null) {
-                annotatedDefault = name;
+            if (annotation != null && annotation.defaultLoop()) {
+                // 多个候选按 order() 取最小者 —— 这正是 @LlmLoop 的 javadoc 承诺的语义，
+                // 以前是"注册顺序里第一个胜出"，order 从未参与比较。
+                competitors.add(name);
+                if (annotation.order() < annotatedOrder) {
+                    annotatedOrder = annotation.order();
+                    annotatedDefault = name;
+                }
             }
             log.info("[benxin] 注册自定义 Loop [{}] ← {}", name, targetClass.getName());
         }
+        if (competitors.size() > 1) {
+            log.info("[benxin] 有 {} 个 Loop 声明 defaultLoop = true {}，按 order 取最小的 [{}]",
+                    competitors.size(), competitors, annotatedDefault);
+        }
 
         String configured = properties.getAgent().getDefaultLoop();
-        if (configured != null && registry.contains(configured)) {
-            registry.setDefault(configured);
+        if (configured != null && !configured.isBlank()) {
+            if (registry.contains(configured)) {
+                registry.setDefault(configured);
+            } else {
+                log.warn("[benxin] llm.agent.default-loop 指定的 Loop [{}] 未注册，可用: {}；将回退到 {}",
+                        configured, registry.names(),
+                        annotatedDefault != null ? annotatedDefault : "dsh-minimal");
+                registry.setDefault(annotatedDefault != null ? annotatedDefault : "dsh-minimal");
+            }
         } else if (annotatedDefault != null) {
+            // 只有"用户没在配置里显式指定"时，@LlmLoop(defaultLoop = true) 才轮到说话。
+            // 以前 defaultLoop 的字段默认值就是 "dsh-minimal"，第一个分支恒真，这里成了死代码。
             registry.setDefault(annotatedDefault);
         } else {
             registry.setDefault("dsh-minimal");
@@ -245,7 +266,7 @@ public class LlmAutoConfiguration {
         }
         try {
             if (hasInline) {
-                return WorkflowIo.read(config.getInline());
+                return WorkflowIo.read(config.getInline(), inlineFormat(where, config.getFormat()));
             }
             Resource resource = resourceLoader.getResource(config.getLocation());
             if (!resource.exists()) {
@@ -259,6 +280,19 @@ public class LlmAutoConfiguration {
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException(where + " 的定义非法：" + e.getMessage(), e);
         }
+    }
+
+    /** 解析 {@code llm.workflows.<key>.format}；留空按 auto 处理。 */
+    private static WorkflowIo.Format inlineFormat(String where, String configured) {
+        if (configured == null || configured.isBlank()) {
+            return WorkflowIo.Format.AUTO;
+        }
+        return switch (configured.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "auto" -> WorkflowIo.Format.AUTO;
+            case "yaml", "yml" -> WorkflowIo.Format.YAML;
+            case "json" -> WorkflowIo.Format.JSON;
+            default -> throw new IllegalStateException(where + ".format 只支持 auto / yaml / json，收到: " + configured);
+        };
     }
 
     // ------------------------------------------------------------------
