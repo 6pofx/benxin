@@ -14,6 +14,9 @@ public interface WeatherAssistant {
 @Autowired WeatherAssistant assistant;   // 注入即用
 ```
 
+> **想看完整示例？** 配套仓库 [**`benxin_example`**](https://github.com/6pofx/benxin_example)
+> 用 12 个可独立运行的 Spring Boot 子项目、794 个离线用例，把下面每一个切面都演示了一遍。
+
 ---
 
 ## 目录
@@ -29,6 +32,7 @@ public interface WeatherAssistant {
 - [可观测性](#可观测性)
 - [模块结构](#模块结构)
 - [运行示例](#运行示例)
+- [完整示例工程](#完整示例工程)
 - [设计取舍](#设计取舍)
 - [版本与升级](#版本与升级)
 
@@ -976,7 +980,7 @@ mvn -o spring-boot:run        # 启动即打印 7 个演示
 或者直接跑打好的可执行包：
 
 ```bash
-java -jar benxin-examples/target/benxin-examples-1.1.0.jar
+java -jar benxin-examples/target/benxin-examples-1.1.1.jar
 ```
 
 示例默认使用**离线 Mock 模型**：不联网、不花钱，但完整跑通
@@ -1042,6 +1046,32 @@ mvn -o spring-boot:run -Dspring-boot.run.profiles=real
 
 示例覆盖：声明式调用、工具闭环、自定义 Loop、流式输出、强类型返回值、
 程序化组装（不用注解也能换掉任意组件）、拦截器生效范围、**声明式工作流**。
+
+---
+
+## 完整示例工程
+
+上面这个 `benxin-examples` 的定位是"5 分钟看清骨架"。要把**每个切面都演示到、并且每条结论都被断言钉住**
+的版本在配套仓库 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)：
+
+| | `benxin-examples`（本仓库） | [`benxin_example`](https://github.com/6pofx/benxin_example)（配套示例） |
+|---|---|---|
+| 形态 | 1 个应用 / 7 个演示 | **12 个可独立启动的 Spring Boot 子项目** + 1 个共享离线模块 |
+| 用例 | 冒烟跑通 | **794 个** `@SpringBootTest` 断言 |
+| 适合 | 先跑一遍，看清整体结构 | 逐切面查阅、升级前后做回归 |
+
+它把本 README 里提到的能力几乎都演示了一遍：注解全属性、内置 Agent Loop（含 `workflow` / `staged`
+两种编排）、四种协议的**线级报文**、沙箱与四种审批、上下文压缩与分词估算、监听器与拦截器全回调、
+逐个切面的 bean 覆盖、MySQL 持久化、真实 DeepSeek 联调，以及本机小模型（LM Studio + Qwen3-VL）的**视觉**演示。
+
+```bash
+git clone https://github.com/6pofx/benxin_example.git
+cd benxin_example
+mvn test          # 794 个用例，默认离线、零 token
+```
+
+> 这个工程同时是 1.1.1 这轮修复的来源：它实测上报了 31 条缺陷（本版本修复了 30 条），
+> 修复后对应断言被翻转成"钉住新行为"，因此那 794 个用例现在也是本项目的兼容性回归套件。
 
 ---
 
