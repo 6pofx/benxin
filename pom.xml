@@ -38,7 +38,6 @@
     <modules>
         <module>benxin-core</module>
         <module>benxin-spring-boot-starter</module>
-        <module>benxin-examples</module>
     </modules>
 
     <properties>

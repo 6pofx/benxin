@@ -448,4 +448,4 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | 运行时引擎 | `core/agent/DefaultAgent.java`, `core/loop/DefaultLoopContext.java` |
 | 提示词模板 | `core/prompt/PromptTemplates.java` |
 | Spring 集成 | `spring/LlmAutoConfiguration.java`, `spring/LlmAgentRegistrar.java` |
-| 可运行示例 | `benxin-examples/` |
+| 可运行示例 | 独立仓库 [`6pofx/benxin_example`](https://github.com/6pofx/benxin_example) —— 本仓库只含两个库模块，示例模块已迁出 |
