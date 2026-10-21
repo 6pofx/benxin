@@ -14,6 +14,10 @@ import com.benxin.llm.core.prompt.SystemPromptProvider;
 import com.benxin.llm.core.sandbox.CompositeSandbox;
 import com.benxin.llm.core.sandbox.ToolSandbox;
 import com.benxin.llm.core.tool.ToolCallback;
+import com.benxin.llm.core.workflow.NodeInput;
+import com.benxin.llm.core.workflow.NodeOutput;
+import com.benxin.llm.core.workflow.WorkflowHandler;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.spring.fixture.FixtureTools;
 import com.benxin.llm.spring.fixture.StubModel;
 import org.junit.jupiter.api.DisplayName;
@@ -422,6 +426,91 @@ class LlmAutoConfigurationTest {
                 public void finish() {
                 }
             };
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 工作流 Java 节点
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("@LlmNode 标注的处理器 bean 会被收进注册表")
+    void registersWorkflowHandlers() {
+        runner.withBean("upperHandler", WorkflowHandler.class, UpperHandler::new)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    WorkflowHandlerRegistry handlers = context.getBean(WorkflowHandlerRegistry.class);
+                    assertThat(handlers.names()).containsExactly("upper");
+                    assertThat(handlers.require("upper")).isInstanceOf(UpperHandler.class);
+                });
+    }
+
+    @Test
+    @DisplayName("没有处理器 bean 时注册表为空，但不阻止启动")
+    void emptyHandlerRegistryIsFine() {
+        runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean(WorkflowHandlerRegistry.class).isEmpty()).isTrue();
+        });
+    }
+
+    @Test
+    @DisplayName("没有 @LlmNode 的处理器 bean 让启动失败，而不是被静默忽略")
+    void handlerWithoutAnnotationFailsFast() {
+        runner.withBean("bareHandler", WorkflowHandler.class, () -> in -> NodeOutput.of("x"))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining("@LlmNode");
+                });
+    }
+
+    @Test
+    @DisplayName("工作流引用已注册的处理器时正常启动，并按名字建 Loop")
+    void workflowWithRegisteredHandlerStarts() {
+        runner.withBean("upperHandler", WorkflowHandler.class, UpperHandler::new)
+                .withPropertyValues("llm.workflows.javafied.inline=" + String.join("\n",
+                        "name: javafied",
+                        "nodes:",
+                        "  - id: a",
+                        "    type: java",
+                        "    handler: upper",
+                        "    args:",
+                        "      text: \"${input}\"",
+                        "  - id: done",
+                        "    type: end",
+                        "    output: \"${a}\"",
+                        "edges:",
+                        "  - from: a",
+                        "    to: done"))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(LoopRegistry.class).contains("workflow:javafied")).isTrue();
+                });
+    }
+
+    @Test
+    @DisplayName("工作流引用未注册的处理器时启动失败，并列出已注册清单")
+    void workflowWithMissingHandlerFailsFast() {
+        runner.withPropertyValues("llm.workflows.javafied.inline=" + String.join("\n",
+                        "name: javafied",
+                        "nodes:",
+                        "  - id: a",
+                        "    type: java",
+                        "    handler: nope"))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("llm.workflows.javafied")
+                            .hasStackTraceContaining("未注册的 Java 处理器 [nope]");
+                });
+    }
+
+    /** 工作流 Java 节点处理器样例：把 args.text 转成大写。 */
+    @com.benxin.llm.core.annotation.LlmNode("upper")
+    static class UpperHandler implements WorkflowHandler {
+        @Override
+        public NodeOutput handle(NodeInput input) {
+            return NodeOutput.of(input.arg("text").toUpperCase());
         }
     }
 

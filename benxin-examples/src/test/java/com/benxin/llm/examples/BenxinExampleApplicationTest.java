@@ -66,6 +66,9 @@ class BenxinExampleApplicationTest {
     @Autowired
     private WeatherTools weatherTools;
 
+    @Autowired
+    private com.benxin.llm.core.workflow.WorkflowHandlerRegistry workflowHandlers;
+
     @Test
     @DisplayName("四个声明式 Agent 接口都能被注入")
     void declarativeAgentsAreInjectable() {
@@ -139,6 +142,30 @@ class BenxinExampleApplicationTest {
         String urgent = releaseNoteWriter.draft("紧急修复：支付回调偶发超时");
         assertThat(urgent).contains("加急通道").contains("【加急补充】");
         assertThat(urgent).doesNotContain("（本次为常规发布，无需加急补充）");
+    }
+
+    @Test
+    @DisplayName("java 节点：@LlmNode 处理器被注册，它写回的文本与变量都进入了最终答案")
+    void javaNodeHandlerIsRegisteredAndRuns() {
+        assertThat(workflowHandlers.names()).contains("text-stats");
+
+        String note = releaseNoteWriter.draft("新增了导出 CSV 的功能");
+
+        // 文本通道：NodeOutput.output() → ${stats}
+        assertThat(note).contains("篇幅：字数 ");
+        // 变量通道：NodeOutput.variables() 里的 lengthLevel → ${lengthLevel}
+        // 具体取"合适"还是"偏长"取决于 mock 输出的长度，这里只断言这条通路成立
+        assertThat(note).containsPattern("篇幅判定：(合适|偏长)");
+    }
+
+    @Test
+    @DisplayName("java 节点不需要模型：整张图里它不产生额外的模型往返")
+    void javaNodeDoesNotCostModelCalls() {
+        // 正常通道：agent 节点只有一个（classify），java / set / tool / end 都不调模型
+        var result = agentRegistry.get("releaseNoteWriter").call("新增了导出 CSV 的功能");
+
+        // mock 模型每次调用都记一次；这张图只该有一次 agent 节点调用
+        assertThat(result.steps()).isEqualTo(1);
     }
 
     @Test

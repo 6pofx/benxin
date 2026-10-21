@@ -282,9 +282,11 @@ core/workflow/                      ← 领域模型 + 引擎，不依赖任何�
   WorkflowDefinition / Node / Edge    图本身（纯数据，可序列化、可断言、可静态分析）
   WorkflowState                       运行期黑板（变量 + input / last / error / current）
   Templates / Conditions              ${} 插值 与 边条件表达式（含加载期语法校验）
-  WorkflowRuntime                     四个方法的副作用接口：callAgent / callTool / emit / outOfBudget
-  WorkflowEngine                      按图推进（分支、循环、重试、预算、护栏）
+  WorkflowRuntime                     五个方法的副作用接口：callAgent / callTool / callHandler / emit / outOfBudget
+  WorkflowEngine                      按图推进（分支、循环、重试、预算、护栏、变量回写）
   WorkflowIo                          YAML（SnakeYAML，可选）与 JSON 两条入口，共用一套校验
+  WorkflowHandler / NodeInput / NodeOutput    Java 节点的契约（只读快照进、文本+变量出）
+  WorkflowHandlerRegistry             Java 处理器的注册表 —— 它本身就是信任边界
 
 core/loop/                          ← 适配层，唯一与 Agent 运行时耦合的地方
   LoopContextRuntime                 把 WorkflowRuntime 转发到 LoopContext
@@ -293,9 +295,25 @@ core/loop/                          ← 适配层，唯一与 Agent 运行时耦
 ```
 
 **为什么引擎要独立成一个不依赖框架的包？** 因为"编排"和"接入 Agent"的变化速度完全不同。
-引擎只依赖四方法的 `WorkflowRuntime`，于是它的全部行为 —— 走错边、绕不出来、失败没兜住 ——
+引擎只依赖 `WorkflowRuntime` 那几个方法，于是它的全部行为 —— 走错边、绕不出来、失败没兜住 ——
 都能用一个假运行时精确断言，不需要模型也不需要网络；而适配层可以随框架演进而改，
 不必重新验证编排逻辑。**代价是多了一个接口**，收益是两条路线共用同一套执行语义。
+`callHandler` 之所以给的是 `default` 方法，也是同一个考虑：新增能力不该让
+"只实现了一半的假运行时"或第三方的运行时实现编译失败。
+
+**Java 节点：为什么是注册制，而不是类名反射。** 这是整个工作流里唯一一处
+"配置能触发代码执行"的地方，值得单独说清楚。三条被排除的路线与理由：
+
+| 候选 | 为什么没选 |
+|---|---|
+| `class: com.foo.Bar` + `method: run` | 一份 YAML 会变成任意代码执行入口；bean 还是 new 实例语义不明；参数匹配要另造一套逻辑 |
+| 复用 `ToolCallback` | 工具是<b>给模型的能力</b>：进 Schema、受沙箱与审批管。这里要的是给图用的逻辑，两者生命周期与服务对象都不同 |
+| 让处理器自己决定下一条边 | 会把"唯一一种路由机制"变成两种，分支逻辑就再也无法从图上一眼看全 |
+
+于是只剩"名字 → 已注册实例"，而这张注册表**就是信任边界**：定义只能点名宿主已经装进来的东西。
+处理器因此**不经过** `ToolSandbox` 与审批 —— 它等同于应用自己的 service，
+再套一层沙箱只是把同一条边界画两遍。这条边界必须显式写出来，否则后来的人不会知道
+"工作流定义里有一个代码执行面"。
 
 **三道防线，针对三种不同的失控**（这是引擎里最值得说的部分）：
 
@@ -335,6 +353,13 @@ llm.tools.allow-exec=false        ← 执行命令
 HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模型调用、
 并可能间接驱动本地工具执行的入口，不应该因为"引了依赖"就自动对外。
 
+**工作流的 Java 节点是另一类边界，值得单独标出来。** 内置工具的防线是"缩小模型能做什么"，
+而 Java 节点的防线是"**缩小配置能叫起什么**"：定义里只能写 `handler: <名字>`，
+而名字只能解析到宿主用 `@LlmNode` 注册进来的那批实例上，反射式的 `class` / `method` 被刻意排除。
+因此它**不走** `ToolSandbox`、也不走审批 —— 再套一层沙箱只是把同一条边界画两遍，
+反而会让人误以为"处理器是被隔离的"。真正的前提是：`llm.workflows.*` 与工作流定义文件
+属于**可信配置源**，不要让外部输入决定它们的内容。这一点与 `llm.tools.*` 的取舍同源。
+
 ---
 
 ## 十、扩展指南
@@ -350,7 +375,11 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 
 **加一种工作流节点类型** → 在 `NodeType` 加枚举值，在 `WorkflowEngine.dispatch` 加一个分支，
 在 `WorkflowNode.validate` 加该类型的必填校验。三处都很小，但请先想清楚它是否真该是个节点 ——
-把逻辑下沉到工具里通常更好。
+大部分"我想再加一种节点"的诉求，其实该做成 `java` 节点里的一个处理器。
+
+**加一个工作流 Java 处理器** → 实现 `WorkflowHandler`，在类上打 `@LlmNode("名字")` 并注册成 bean；
+工作流里用 `type: java` + `handler: 名字` 引用。定义里写错名字会在**启动期**报错并列出已注册清单，
+不必等任务跑到一半才发现。
 
 **加一个工具** → 在任意 Spring bean 的方法上打 `@LlmTool`；
 或者实现 `ToolCallback` 注册为 bean；或者用 `LlmToolCatalog.register(...)` 动态登记。
@@ -378,6 +407,11 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | `matches` 的右操作数按原文截取 | 正则本身就是一门语言，先分词再拼回去会拆坏 `(?i)` 这类写法 | 与 `and` / `or` / `)` 相邻时必须加引号 |
 | 节点 id 不能叫 `input` / `last` / `error` / `current` | 同名会遮蔽内置变量，是最难排查的一类 bug | 加载期直接报错并提示改名 |
 | YAML 入口需要 SnakeYAML（core 里声明为 optional） | core 不想为可选入口背一个必装依赖 | 无 Spring 的裸 core 场景改用 JSON，或自行引入 snakeyaml |
+| 工作流 Java 处理器不经沙箱与审批 | 处理器是宿主注册的代码，等同于应用自己的 service；注册制本身已是边界 | 信任边界变化必须在文档里写明；`workflow:*` 定义不要来自不可信配置源 |
+| Java 处理器不能调模型与工具 | 否则"模型与工具只在被点名的地方出现"这个可见性承诺就破了 | 需要模型/工具时改用 `agent` / `tool` 节点，多两行 YAML |
+| Java 处理器不能直接指定下一条边 | 保证整张图只有一种路由机制（边条件表达式），分支才看得全 | 处理器只写变量，路由交给 `when:` |
+| 没有 `@LlmNode` 的处理器 bean 让启动失败 | 静默跳过会留下"注册了但用不上"的代码，排查成本极高 | 测试替身也要打注解 |
+| 引用了未注册处理器的定义在启动期失败 | 这纯属静态问题，没理由留到运行期 | 无法"先启动再补注册"（运行时注册仍可用于非 Spring 场景） |
 
 ---
 
@@ -389,6 +423,7 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | 工具 | 真实反射 + 真实文件系统 | Schema 生成、参数绑定、沙箱拦截 |
 | Loop | `ScriptedModel`（按脚本吐响应） | 步数、工具序列、文本协议降级 |
 | 工作流引擎 | 假 `WorkflowRuntime`（按节点 id 编排返回值与失败次数） | 分支选择、循环退出、重试、`continueOnError`、预算中断、两道护栏 |
+| 工作流 Java 节点 | 假运行时 + 真实注册表 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、缺处理器时的报错文案 |
 | Agent | 假模型 + 假沙箱 + 假审批 | 工具闭环、拦截器、记忆、超时、并行顺序 |
 | 集成 | `ApplicationContextRunner` | 条件装配、用户 bean 覆盖、开关语义 |
 | 端到端 | `@SpringBootTest` + `@LlmAgent` 接口 | 注解 → 代理 → 运行时 → 模型 全链路 |
@@ -408,6 +443,7 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | 内置工具 | `core/tool/builtin/` |
 | Agent 循环 | `core/loop/` |
 | 工作流引擎（领域模型 / 引擎 / 条件表达式 / 读写） | `core/workflow/` |
+| 工作流 Java 节点的契约与注册表 | `core/workflow/WorkflowHandler.java`, `NodeInput.java`, `NodeOutput.java`, `WorkflowHandlerRegistry.java`, `core/annotation/LlmNode.java` |
 | 工作流的 Agent 适配层与两条路线 | `core/loop/WorkflowLoop.java`, `core/loop/StagedLoop.java`, `core/loop/LoopContextRuntime.java` |
 | 运行时引擎 | `core/agent/DefaultAgent.java`, `core/loop/DefaultLoopContext.java` |
 | 提示词模板 | `core/prompt/PromptTemplates.java` |

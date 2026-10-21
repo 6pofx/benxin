@@ -36,6 +36,21 @@ public interface WorkflowRuntime {
      */
     String callTool(String tool, Map<String, Object> args, WorkflowNode node);
 
+    /**
+     * 执行一个 Java 节点：把请求转给宿主注册的 {@link WorkflowHandler}。
+     *
+     * <p>刻意给了默认实现并默认抛异常：工作流引擎可以继续用"不实现这个方法的假运行时"
+     * 做纯逻辑单测，第三方自己写的 {@code WorkflowRuntime} 也不会因为新增能力而编译失败。
+     * 真正的实现只有 {@code LoopContextRuntime} 一个。</p>
+     *
+     * @param handler 处理器名（来自节点的 {@code handler} 字段）
+     * @param input   已渲染的参数与黑板快照
+     */
+    default NodeOutput callHandler(String handler, NodeInput input, WorkflowNode node) {
+        throw new UnsupportedOperationException(
+                "当前工作流运行时未启用 Java 节点（handler=" + handler + "）。");
+    }
+
     /** 广播一个事件（会转给 {@code AgentListener.onCustomEvent}）。 */
     void emit(String type, Object payload);
 

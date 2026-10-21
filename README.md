@@ -551,8 +551,9 @@ public interface ReleaseNoteWriter {
 }
 ```
 
-**六种节点**：`start`（透传输入）、`agent`（一次模型子任务）、`tool`（直调工具）、
-`branch`（按条件路由）、`set`（写变量）、`end`（产出最终答案）。
+**七种节点**：`start`（透传输入）、`agent`（一次模型子任务）、`tool`（直调工具）、
+`java`（执行宿主注册的本地逻辑，见下）、`branch`（按条件路由）、`set`（写变量）、
+`end`（产出最终答案）。
 **循环不需要专门的节点**：把边指回上游即可。
 
 **条件表达式**是一小门贴近自然语言的语言，支持 `==` `!=` `>` `>=` `<` `<=`
@@ -601,6 +602,50 @@ ${summary} is not empty
 ```java
 agent.call(input, sessionId, Map.of("benxin.workflow", yamlOrJsonText), stream);
 ```
+
+#### Java 节点：把一段本地逻辑放进图里
+
+有些步骤既不该写成提示词，也不该交给模型当工具用 —— 业务规则、格式转换、校验、
+跟本地系统打交道。这类逻辑用一个**注册好的处理器**挂在 `java` 节点上：
+
+```java
+@Component
+@LlmNode("text-stats")                       // 名字就是工作流里 handler: 引用的名字
+public class TextStatsHandler implements WorkflowHandler {
+    @Override
+    public NodeOutput handle(NodeInput input) {
+        String text = input.arg("text");      // args 已经渲染过 ${...}
+        return NodeOutput.of("字数 " + text.length(),
+                Map.of("lengthLevel", text.length() > 400 ? "偏长" : "合适"));
+    }
+}
+```
+
+```yaml
+- id: stats
+  type: java
+  handler: text-stats
+  args:
+    text: "${classify}"          # 和 tool 节点一样会被渲染
+
+- id: report
+  type: end
+  output: "篇幅：${stats}\n判定：${lengthLevel}"   # ${stats} 是文本通道，${lengthLevel} 是变量通道
+```
+
+**两条输出通道**：`NodeOutput.of(text)` 只给文本；`NodeOutput.of(text, vars)` 同时写回变量；
+`NodeOutput.vars(vars)` 只写变量；`NodeOutput.none()` 什么都不产出（像 `branch` / `set`
+那样不覆盖 `${last}`）。节点 id 那个键永远代表它自己的输出，返回同名变量不会把它顶掉。
+
+**三个刻意的边界**：处理器**不能调模型、不能调工具、不能直接指定下一条边**。
+需要模型就用 `agent` 节点，需要工具就用 `tool` 节点，路由交给出边的条件表达式 ——
+图的可见性与可审计性正来自于"模型与工具只在被点名的地方出现"。
+
+**信任边界**：处理器是宿主自己编译并注册的代码，等同于应用自己的 service，
+因此**不经过** `ToolSandbox` 与审批。安全性来自注册制本身 ——
+定义里只能点名这里已有的东西；反射形式的 `class` / `method` 被刻意排除，
+否则一份工作流定义就成了任意代码执行入口。所以定义引用不存在的处理器时，
+Spring 侧会在**启动期**失败并列出已注册清单，而不是等任务跑到一半才炸。
 
 ### 二、结构化编排：`staged` —— 流程固化在代码里
 
@@ -1150,7 +1195,7 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 |---|---|
 | **四个内置协议** | 除 openai / anthropic / gemini 外新增 **OpenAI Responses API**（`protocol: responses`）—— `input[]` item 列表、顶层 `instructions`、扁平 `tools[]`、命名 SSE 事件 |
 | **协议扩展点** | `Protocol` 由封闭枚举改为**可扩展标识类型** + 新增 `ProtocolRegistry`：注册一个 `ProtocolCodec` bean 就能在配置里写 `protocol: bedrock`，见[加自己的协议](#加自己的协议) |
-| **工作流模式** | 两个新 Loop：`workflow`（声明式图编排，六种节点 + 条件表达式 + `${}` 模板）与 `staged`（规划 → 执行 → 验收 → 修复 → 汇总） |
+| **工作流模式** | 两个新 Loop：`workflow`（声明式图编排，七种节点 + 条件表达式 + `${}` 模板 + 注册制 Java 节点）与 `staged`（规划 → 执行 → 验收 → 修复 → 汇总） |
 | **枚举之外的 Loop** | 内置 Loop 增至 8 个（`dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged`） |
 | **子代理可观测** | 子代理用量补记进父上下文；新增 `SubAgentObserver` 观察点，自定义 Loop 能在真实派生路径上收到通知 |
 | **46 条实测缺陷修复** | 由独立集成测试工程 `benxin_test`（493 个测试）逐条实测并复验 |
@@ -1231,7 +1276,7 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `JsonSchemaGeneratorTest` | 6 | 类型映射、枚举、集合、嵌套 POJO、`Optional` 解包、required 规则 |
 | `AgentRuntimeTest` | 18 | 工具闭环、未知工具、沙箱拒绝、审批拒绝与放行、拦截器短路与改写、`returnDirect`、步数上限、记忆、生命周期事件、**并行结果顺序**、超时、结果截断、用量累计、`toBuilder` 隔离 |
 | `ConditionsTest` | 28 | 工作流条件表达式：全部运算符、`not/and/or` 与括号、`is empty` / `exists` / `missing`、语法错误提示 |
-| `WorkflowEngineTest` | 21 | 六种节点、边序即优先级、回边循环、`maxVisitsPerNode` 护栏、节点 `retry`、`continueOnError` 补偿、预算中断 |
+| `WorkflowEngineTest` | 21 | 六种内置节点、边序即优先级、回边循环、`maxVisitsPerNode` 护栏、节点 `retry`、`continueOnError` 补偿、预算中断 |
 | `WorkflowIoTest` | 18 | YAML/JSON 读写往返、缺字段与非法字段的加载期报错、`retry` / `maxStepsPerNode` 解析 |
 | `StagedLoopTest` | 10 | 规划 → 执行 → 验收 → 修复 → 汇总；关掉验收后退化为「带汇总的 plan-execute」 |
 | `WorkflowLoopTest` | 9 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes |

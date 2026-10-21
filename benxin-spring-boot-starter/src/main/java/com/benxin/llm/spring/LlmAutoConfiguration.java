@@ -3,6 +3,7 @@ package com.benxin.llm.spring;
 import com.benxin.llm.core.loop.AgentLoop;
 import com.benxin.llm.core.annotation.LlmGuard;
 import com.benxin.llm.core.annotation.LlmLoop;
+import com.benxin.llm.core.annotation.LlmNode;
 import com.benxin.llm.core.annotation.LlmModelDef;
 import com.benxin.llm.core.context.ContextCompactor;
 import com.benxin.llm.core.context.ContextManager;
@@ -16,6 +17,10 @@ import com.benxin.llm.core.loop.LoopRegistry;
 import com.benxin.llm.core.loop.WorkflowLoop;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
 import com.benxin.llm.core.workflow.WorkflowIo;
+import com.benxin.llm.core.workflow.WorkflowHandler;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
+import com.benxin.llm.core.workflow.WorkflowNode;
+import com.benxin.llm.core.workflow.NodeType;
 import com.benxin.llm.core.memory.InMemoryMemoryStore;
 import com.benxin.llm.core.memory.MemoryStore;
 import com.benxin.llm.core.model.LlmModel;
@@ -177,16 +182,52 @@ public class LlmAutoConfiguration {
     }
 
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // 工作流 Java 节点
+    // ------------------------------------------------------------------
+
+    /**
+     * 收集容器里所有 {@link WorkflowHandler} bean，按 {@link LlmNode} 上的名字建表。
+     *
+     * <p>这张表就是工作流里 {@code handler:} 那个字符串的<b>解析边界</b>：定义只能点名这里
+     * 已有的东西，因此"配置文件能不能执行任意代码"被收敛成了"宿主装了哪些处理器"。
+     * 正因如此，注册在这里的处理器<b>不经过</b>工具沙箱与审批 —— 它等同于应用自己的 service。</p>
+     *
+     * <p>缺注解直接让启动失败，而不是回落到类名或静默跳过：类名会随重构变化，
+     * 而调用方写的是字符串，静默等于埋一个只在重命名时爆的雷。</p>
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkflowHandlerRegistry llmWorkflowHandlerRegistry(ObjectProvider<WorkflowHandler> handlerBeans) {
+        WorkflowHandlerRegistry registry = new WorkflowHandlerRegistry();
+        for (WorkflowHandler handler : handlerBeans.orderedStream().toList()) {
+            Class<?> targetClass = AopUtils.getTargetClass(handler);
+            LlmNode annotation = targetClass.getAnnotation(LlmNode.class);
+            if (annotation == null || annotation.value().isBlank()) {
+                throw new IllegalStateException("工作流处理器 [" + targetClass.getName()
+                        + "] 缺少 @LlmNode(\"名字\")，无法确定它在工作流里叫什么");
+            }
+            registry.register(annotation.value(), handler);
+            log.info("[benxin] 注册工作流处理器 [{}] ← {}", annotation.value(), targetClass.getName());
+        }
+        if (!registry.isEmpty()) {
+            log.info("[benxin] 可用工作流处理器 {}", registry.names());
+        }
+        return registry;
+    }
+
+    // ------------------------------------------------------------------
     // Loop
     // ------------------------------------------------------------------
 
     @Bean
     @ConditionalOnMissingBean
     public LoopRegistry llmLoopRegistry(LlmProperties properties, ObjectProvider<AgentLoop> loopBeans,
-                                        ResourceLoader resourceLoader) {
+                                        ResourceLoader resourceLoader,
+                                        WorkflowHandlerRegistry workflowHandlers) {
         LoopRegistry registry = new LoopRegistry();
         BuiltinLoops.registerAll(registry);
-        registerDeclaredWorkflows(registry, properties, resourceLoader);
+        registerDeclaredWorkflows(registry, properties, resourceLoader, workflowHandlers);
 
         String annotatedDefault = null;
         int annotatedOrder = Integer.MAX_VALUE;
@@ -241,15 +282,35 @@ public class LlmAutoConfiguration {
      * 一份跑起来才发现画错的图，比一个启动期的报错昂贵得多。</p>
      */
     private void registerDeclaredWorkflows(LoopRegistry registry, LlmProperties properties,
-                                           ResourceLoader resourceLoader) {
+                                           ResourceLoader resourceLoader,
+                                           WorkflowHandlerRegistry handlers) {
         for (Map.Entry<String, LlmProperties.WorkflowProperties> entry
                 : properties.getWorkflows().entrySet()) {
             String key = entry.getKey();
             String loopName = WorkflowLoop.NAME + ":" + key;
             WorkflowDefinition definition = loadWorkflow(key, entry.getValue(), resourceLoader);
-            registry.register(loopName, WorkflowLoop.named(loopName, definition));
+            assertHandlersPresent(key, definition, handlers);
+            registry.register(loopName, WorkflowLoop.named(loopName, definition, handlers));
             log.info("[benxin] 注册工作流 Loop [{}] ← {}（{} 个节点）",
                     loopName, definition.name(), definition.nodes().size());
+        }
+    }
+
+    /**
+     * 启动期把"定义引用了不存在的 Java 处理器"拦下来。
+     *
+     * <p>这类错误在运行期才炸的话，往往是任务跑到一半才失败；而它其实是纯粹的静态问题 ——
+     * 名字写错了、或者忘了给处理器打 {@code @LlmNode}。既然能在启动期说清楚，就不该留给运行期。</p>
+     */
+    private void assertHandlersPresent(String key, WorkflowDefinition definition,
+                                       WorkflowHandlerRegistry handlers) {
+        for (WorkflowNode node : definition.nodes()) {
+            if (node.type() != NodeType.JAVA || handlers.contains(node.handler())) {
+                continue;
+            }
+            throw new IllegalStateException("llm.workflows." + key + " 的节点 [" + node.id()
+                    + "] 引用了未注册的 Java 处理器 [" + node.handler() + "]，已注册: " + handlers.names()
+                    + "（在处理器类上打 @LlmNode(\"名字\") 即可注册）");
         }
     }
 

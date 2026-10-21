@@ -7,6 +7,7 @@ import com.benxin.llm.core.util.Json;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
 import com.benxin.llm.core.workflow.WorkflowEngine;
 import com.benxin.llm.core.workflow.WorkflowException;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.core.workflow.WorkflowIo;
 import com.benxin.llm.core.workflow.WorkflowRun;
 import com.benxin.llm.core.workflow.WorkflowState;
@@ -64,15 +65,16 @@ public class WorkflowLoop extends AbstractAgentLoop {
 
     private final WorkflowDefinition definition;
     private final String loopName;
+    private final WorkflowHandlerRegistry handlers;
 
     /** 无默认定义：每次运行都必须从属性里拿到定义。 */
     public WorkflowLoop() {
-        this(null, null);
+        this(null, null, null);
     }
 
     /** 绑定一个默认定义；Spring 侧每个 {@code llm.workflows.*} 都这样构造一个实例。 */
     public WorkflowLoop(WorkflowDefinition definition) {
-        this(null, definition);
+        this(null, definition, null);
     }
 
     /**
@@ -82,8 +84,18 @@ public class WorkflowLoop extends AbstractAgentLoop {
      * @param definition 默认定义，可为 null
      */
     public WorkflowLoop(String loopName, WorkflowDefinition definition) {
+        this(loopName, definition, null);
+    }
+
+    /**
+     * @param handlers Java 节点的处理器注册表；图里没有 java 节点时传 null 即可
+     *                 （null 会被换成空表，于是引用 handler 时报的是"未注册"而不是空指针）
+     */
+    public WorkflowLoop(String loopName, WorkflowDefinition definition,
+                        WorkflowHandlerRegistry handlers) {
         this.definition = definition;
         this.loopName = loopName == null || loopName.isBlank() ? null : loopName;
+        this.handlers = handlers == null ? WorkflowHandlerRegistry.empty() : handlers;
     }
 
     public static WorkflowLoop of(WorkflowDefinition definition) {
@@ -96,7 +108,13 @@ public class WorkflowLoop extends AbstractAgentLoop {
      * @param loopName {@code LoopRegistry} 里用的名字（如 {@code workflow:code-review}）
      */
     public static WorkflowLoop named(String loopName, WorkflowDefinition definition) {
-        return new WorkflowLoop(loopName, definition);
+        return new WorkflowLoop(loopName, definition, null);
+    }
+
+    /** 按注册名构造并绑定处理器注册表：Spring 侧每个 {@code llm.workflows.*} 走这条。 */
+    public static WorkflowLoop named(String loopName, WorkflowDefinition definition,
+                                     WorkflowHandlerRegistry handlers) {
+        return new WorkflowLoop(loopName, definition, handlers);
     }
 
     /** 构造时绑定的默认定义（可能为空）。 */
@@ -134,7 +152,7 @@ public class WorkflowLoop extends AbstractAgentLoop {
         log.debug("[workflow:{}] 开始执行，入口节点 [{}]，共 {} 个节点",
                 resolved.name(), resolved.resolveEntry().id(), resolved.nodes().size());
 
-        WorkflowRun run = new WorkflowEngine().run(resolved, state, new LoopContextRuntime(ctx));
+        WorkflowRun run = new WorkflowEngine().run(resolved, state, new LoopContextRuntime(ctx, handlers));
 
         Map<String, Object> attributes = ctx.attributes();
         attributes.put(RUN_ATTRIBUTE, run);

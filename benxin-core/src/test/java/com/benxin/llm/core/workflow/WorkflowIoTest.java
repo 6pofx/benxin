@@ -395,4 +395,78 @@ class WorkflowIoTest {
         // 测试期 snakeyaml 一定在类路径上（core 把它声明为 optional + 测试可用）
         assertThat(WorkflowIo.yamlAvailable()).isTrue();
     }
+
+    // ---------- Java 节点 ----------
+
+    @Test
+    @DisplayName("java 节点：handler 与 args 都能读入，类型别名 handler 等价")
+    void readsJavaNode() {
+        WorkflowDefinition definition = WorkflowIo.read("""
+                name: with-java
+                nodes:
+                  - id: analyze
+                    prompt: 分析
+                  - id: checksum
+                    type: handler
+                    handler: checksum
+                    args:
+                      text: "${analyze}"
+                      limit: 3
+                  - id: done
+                    type: end
+                    output: "${checksum}"
+                edges:
+                  - from: analyze
+                    to: checksum
+                  - from: checksum
+                    to: done
+                """);
+
+        assertThat(definition.require("checksum").type()).isEqualTo(NodeType.JAVA);
+        assertThat(definition.require("checksum").handler()).isEqualTo("checksum");
+        assertThat(definition.require("checksum").args())
+                .containsEntry("text", "${analyze}")
+                .containsEntry("limit", 3);
+    }
+
+    @Test
+    @DisplayName("java 节点缺 handler 在加载期就被拒绝")
+    void rejectsJavaNodeWithoutHandler() {
+        assertThatThrownBy(() -> WorkflowIo.read("""
+                name: w
+                nodes:
+                  - id: a
+                    type: java
+                """))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("必须提供 handler");
+    }
+
+    @Test
+    @DisplayName("往返保留 handler —— 否则写出去的图读回来就不可执行了")
+    void roundTripsHandler() {
+        WorkflowDefinition original = WorkflowIo.read("""
+                name: j
+                nodes:
+                  - id: a
+                    type: java
+                    handler: checksum
+                    args:
+                      text: "${input}"
+                  - id: done
+                    type: end
+                    output: "${a}"
+                edges:
+                  - from: a
+                    to: done
+                """);
+
+        String written = WorkflowIo.writeJson(original);
+        assertThat(written).contains("\"handler\" : \"checksum\"");
+
+        WorkflowDefinition restored = WorkflowIo.read(written, WorkflowIo.Format.JSON);
+        assertThat(restored.require("a").type()).isEqualTo(NodeType.JAVA);
+        assertThat(restored.require("a").handler()).isEqualTo("checksum");
+        assertThat(restored.require("a").args()).containsEntry("text", "${input}");
+    }
 }

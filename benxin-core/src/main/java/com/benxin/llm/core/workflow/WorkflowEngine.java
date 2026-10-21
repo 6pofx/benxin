@@ -104,6 +104,11 @@ public final class WorkflowEngine {
                 // 于是"把失败原因写进最终答复"这个最有用的补偿写法会失效。
                 state.clearError();
             }
+            if (!outcome.variables().isEmpty()) {
+                // 先写变量、再记节点输出：节点 id 那个键永远代表它自己的输出，
+                // 处理器返回同名变量不会意外把它顶掉（见 NodeOutput 的键冲突规则）。
+                state.putAll(outcome.variables());
+            }
             if (outcome.producesOutput()) {
                 state.recordNodeOutput(node.id(), outcome.output());
             }
@@ -171,21 +176,36 @@ public final class WorkflowEngine {
     // 节点执行
     // ------------------------------------------------------------------
 
-    /** 一次节点执行的产物。 */
-    private record Outcome(String output, boolean producesOutput, boolean failureSwallowed) {
+    /**
+     * 一次节点执行的产物。
+     *
+     * @param variables 要写回黑板的变量；Java 节点是唯一会带变量的类型，
+     *                  其余节点返回空表。写入时机由引擎统一掌握（见 {@code run}）。
+     */
+    private record Outcome(String output, boolean producesOutput, boolean failureSwallowed,
+                           Map<String, Object> variables) {
 
         static Outcome of(String output) {
-            return new Outcome(output, true, false);
+            return new Outcome(output, true, false, Map.of());
+        }
+
+        static Outcome of(String output, Map<String, Object> variables) {
+            return new Outcome(output, true, false, variables == null ? Map.of() : variables);
         }
 
         /** 纯控制节点（branch / set）不产生输出，因此也不覆盖黑板的 {@code last}。 */
         static Outcome silent() {
-            return new Outcome(null, false, false);
+            return new Outcome(null, false, false, Map.of());
+        }
+
+        /** 同上，但带回变量（Java 节点返回 {@code NodeOutput.none()} 时走这条）。 */
+        static Outcome silent(Map<String, Object> variables) {
+            return new Outcome(null, false, false, variables == null ? Map.of() : variables);
         }
 
         /** 失败了但开启了 continueOnError：不中断，但仍要把 {@code error} 留给下游读。 */
         static Outcome swallowed() {
-            return new Outcome("", true, true);
+            return new Outcome("", true, true, Map.of());
         }
     }
 
@@ -240,6 +260,19 @@ public final class WorkflowEngine {
             case TOOL -> {
                 Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
                 yield Outcome.of(runtime.callTool(node.tool(), args, node));
+            }
+            case JAVA -> {
+                Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
+                NodeInput input = new NodeInput(node.id(), args, state.variables(),
+                        state.input(), state.last(), state.error());
+                NodeOutput result = runtime.callHandler(node.handler(), input, node);
+                if (result == null) {
+                    // 接口约定不得返回 null；这里兜成"无输出"，比让引擎在下一行 NPE 清楚得多
+                    yield Outcome.silent();
+                }
+                yield result.producesOutput()
+                        ? Outcome.of(result.output(), result.variables())
+                        : Outcome.silent(result.variables());
             }
             case SET -> {
                 node.set().forEach((key, template) -> state.put(key, state.render(template)));

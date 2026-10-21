@@ -4,9 +4,12 @@
 ## 由 application.yml 的 llm.workflows.release-notes.location 指向本文件，
 ## 启动后即可用 @LlmAgent(loop = "workflow:release-notes") 引用。
 ##
-## 这张图刻意覆盖了全部六种节点类型与三种边：
-##   start → agent → branch → agent → set → tool → end
+## 这张图刻意覆盖了全部七种节点类型与三种边：
+##   start → agent → branch → agent → set → tool → java → end
 ##   条件边（紧急）+ 默认边 + 无条件边
+##
+## java 节点执行的是 TextStatsHandler（@LlmNode("text-stats")）：数一遍篇幅并写回变量，
+## 既不需要模型也不需要把它变成模型可见的工具。
 ##
 name: release-notes
 description: 发布说明工作流：归类 → 分支（紧急/常规）→ 打时间戳 → 汇总
@@ -50,18 +53,28 @@ nodes:
     type: tool
     tool: get_current_time
 
+  # java 节点：跑一段宿主注册的本地逻辑，结果同时给出文本与变量
+  - id: stats
+    type: java
+    handler: text-stats
+    args:
+      text: "${classify}"
+
   - id: report
     type: end
     output: |
       ────────── 发布说明 ──────────
       通道：${channel}
       生成时间：${stamp}
+      篇幅：${stats}
 
       【要点】
       ${classify}
 
       【加急补充】
       ${urgent:-（本次为常规发布，无需加急补充）}
+
+      （篇幅判定：${lengthLevel}；变量直接来自 java 节点写回的黑板）
 
 edges:
   - from: begin
@@ -81,4 +94,6 @@ edges:
   - from: stamp-normal
     to: stamp
   - from: stamp
+    to: stats
+  - from: stats
     to: report

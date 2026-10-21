@@ -6,6 +6,9 @@ import com.benxin.llm.core.message.Role;
 import com.benxin.llm.core.message.ToolUsePart;
 import com.benxin.llm.core.tool.ToolCallback;
 import com.benxin.llm.core.tool.ToolResult;
+import com.benxin.llm.core.workflow.NodeInput;
+import com.benxin.llm.core.workflow.NodeOutput;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.core.workflow.WorkflowNode;
 import com.benxin.llm.core.workflow.WorkflowRuntime;
 
@@ -16,7 +19,7 @@ import java.util.Optional;
 /**
  * 把 {@link WorkflowRuntime} 接到 {@link LoopContext} 上。
  *
- * <p>这是整个工作流模式里唯一的"框架耦合点"，而且它只有四个方法。
+ * <p>这是整个工作流模式里唯一的"框架耦合点"，而且它只有五个方法。
  * 好处是 {@code core/workflow} 那个包（领域模型 + 引擎）完全不知道 Agent、拦截器、沙箱的存在，
  * 因此可以独立测试、独立复用；而工作流的每一次模型调用与工具调用又都<b>照常</b>经过
  * 沙箱校验、审批、拦截器改写、超时截断、流式转发与用量统计 —— 因为这里调用的就是其它 Loop
@@ -30,9 +33,18 @@ import java.util.Optional;
 public final class LoopContextRuntime implements WorkflowRuntime {
 
     private final LoopContext ctx;
+    private final WorkflowHandlerRegistry handlers;
 
     public LoopContextRuntime(LoopContext ctx) {
+        this(ctx, WorkflowHandlerRegistry.empty());
+    }
+
+    /**
+     * @param handlers Java 节点的处理器注册表；图里没有 java 节点时传空表即可
+     */
+    public LoopContextRuntime(LoopContext ctx, WorkflowHandlerRegistry handlers) {
         this.ctx = ctx;
+        this.handlers = handlers == null ? WorkflowHandlerRegistry.empty() : handlers;
     }
 
     @Override
@@ -88,6 +100,14 @@ public final class LoopContextRuntime implements WorkflowRuntime {
             throw new IllegalStateException(result.content());
         }
         return result.content();
+    }
+
+    @Override
+    public NodeOutput callHandler(String handler, NodeInput input, WorkflowNode node) {
+        // 注册表是唯一的解析依据：找不到就抛，由引擎转成带节点 id 的失败，
+        // 而不是静默返回空串让下游去猜。处理器自己抛的异常同样原样上抛，
+        // 这样节点的 retry / continueOnError 对 java 节点与其它节点完全一致。
+        return handlers.require(handler).handle(input);
     }
 
     @Override
