@@ -1,5 +1,6 @@
 package com.benxin.llm.core.workflow;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -53,6 +54,17 @@ public interface WorkflowRuntime {
 
     /** 广播一个事件（会转给 {@code AgentListener.onCustomEvent}）。 */
     void emit(String type, Object payload);
+
+    /**
+     * 本次运行中"输出被 {@code max_tokens} 截断"的节点 id（按发生顺序，同一节点可重复）。
+     *
+     * <p>为什么由运行时回答而不是由引擎自己判断：只有真正发起模型调用的那一层看得见
+     * {@code finishReason}；引擎拿到的只是一个字符串，无从知道它是"正常说完"还是"预算用完"。
+     * 默认返回空列表，因此用假运行时做纯逻辑单测的实现不需要关心它。</p>
+     */
+    default List<String> truncatedNodes() {
+        return List.of();
+    }
 
     /** 是否已用完步数预算；引擎在每次推进节点前检查。 */
     boolean outOfBudget();

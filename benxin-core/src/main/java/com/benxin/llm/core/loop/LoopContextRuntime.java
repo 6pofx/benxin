@@ -1,6 +1,7 @@
 package com.benxin.llm.core.loop;
 
 import com.benxin.llm.core.chat.ChatResponse;
+import com.benxin.llm.core.chat.FinishReason;
 import com.benxin.llm.core.message.ChatMessage;
 import com.benxin.llm.core.message.Role;
 import com.benxin.llm.core.message.ToolUsePart;
@@ -34,6 +35,8 @@ public final class LoopContextRuntime implements WorkflowRuntime {
 
     private final LoopContext ctx;
     private final WorkflowHandlerRegistry handlers;
+    /** 输出被 max_tokens 截断的节点（按发生顺序；同一节点多次截断就记多次）。 */
+    private final List<String> truncatedNodes = new java.util.ArrayList<>();
 
     public LoopContextRuntime(LoopContext ctx) {
         this(ctx, WorkflowHandlerRegistry.empty());
@@ -60,6 +63,7 @@ public final class LoopContextRuntime implements WorkflowRuntime {
             }
             ChatResponse response = ctx.callModel();
             calls++;
+            noteTruncation(response, node);
             if (response.message() == null) {
                 return "";
             }
@@ -82,11 +86,36 @@ public final class LoopContextRuntime implements WorkflowRuntime {
         if (!outOfBudget()) {
             ctx.append(ChatMessage.user("本步骤的工具调用次数已达上限，请直接根据已有信息给出结论，不要再调用工具。"));
             ChatResponse wrapUp = ctx.callModel();
+            noteTruncation(wrapUp, node);
             if (wrapUp.message() != null) {
                 return wrapUp.message().text();
             }
         }
         return lastAssistantText();
+    }
+
+    /**
+     * 记录"这个节点的这次响应被 {@code max_tokens} 截断"。
+     *
+     * <p>节点级的信号以前是彻底丢掉的：{@code WorkflowRun} 只留最后一次响应的结束原因，
+     * 于是"第 2 个节点被截断、第 4 个节点正常说完"这种图，事后完全看不出中间出过事。</p>
+     */
+    private void noteTruncation(ChatResponse response, WorkflowNode node) {
+        if (response == null || response.finishReason() != FinishReason.LENGTH) {
+            return;
+        }
+        truncatedNodes.add(node.id());
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("workflow", ctx.agentName());
+        payload.put("node", node.id());
+        payload.put("step", ctx.step());
+        payload.put("textEmpty", response.message() == null || response.message().text().isBlank());
+        emit("workflow.node-truncated", payload);
+    }
+
+    @Override
+    public List<String> truncatedNodes() {
+        return List.copyOf(truncatedNodes);
     }
 
     @Override

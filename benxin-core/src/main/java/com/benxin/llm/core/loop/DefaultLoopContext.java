@@ -1,5 +1,6 @@
 package com.benxin.llm.core.loop;
 
+import com.benxin.llm.core.agent.AgentAttributes;
 import com.benxin.llm.core.agent.AgentResult;
 import com.benxin.llm.core.agent.AgentInvocation;
 import com.benxin.llm.core.agent.AgentSession;
@@ -27,6 +28,8 @@ import com.benxin.llm.core.tool.ToolContext;
 import com.benxin.llm.core.tool.ToolInvocation;
 import com.benxin.llm.core.tool.ToolRegistry;
 import com.benxin.llm.core.tool.ToolResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,6 +52,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 把这些都做进上下文之后，写一个新的 Agent Loop 就只剩下纯逻辑。</p>
  */
 public class DefaultLoopContext implements LoopContext, ToolContext {
+
+    private static final Logger log = LoggerFactory.getLogger(DefaultLoopContext.class);
 
     private final DefaultAgent agent;
     private final AgentInvocation invocation;
@@ -305,9 +310,60 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         if (response.message() != null) {
             lastText = response.message().text();
         }
+        recordTruncation(current, response);
         listener.onStepEnd(agentName(), current, response);
         contextManager().afterStep(history, model());
         return response;
+    }
+
+    /**
+     * 输出被 {@code max_tokens} 截断时留下声音。
+     *
+     * <p>以前 {@link FinishReason#LENGTH} 被解析出来、也放进了 {@code AgentResult.finishReason()}，
+     * 然后<b>没有任何消费点</b>：不记日志、不进事件、不进 attributes。对"会思考"的模型这是必然踩到的坑 ——
+     * 实测 {@code max-tokens: 64} 时 64 个 token 全花在 reasoning 上，于是
+     * {@code finish_reason=length} + 正文空串，一次运行看起来正常结束，回答却是空的。
+     * 而且重试/补写都救不回来（约束是 token 预算本身，补写同样只有 64 个 token）。</p>
+     *
+     * <p>这里做三件成本最低的事：打一条 WARN（说明原因与改法）、写进运行属性
+     * （{@link AgentAttributes#TRUNCATED} / {@link AgentAttributes#TRUNCATED_STEPS}，
+     * 中间步被截断不会因为最后一次响应正常而消失）、广播一个 {@code model.truncated} 自定义事件。</p>
+     */
+    private void recordTruncation(int step, ChatResponse response) {
+        if (response == null || response.finishReason() != FinishReason.LENGTH) {
+            return;
+        }
+        boolean blankText = response.message() == null || response.message().text().isBlank();
+        int maxTokens = spec().maxTokens();
+        int outputTokens = response.usage() == null ? 0 : response.usage().outputTokens();
+
+        log.warn("[benxin] Agent [{}] 第 {} 步的输出被 max_tokens 截断"
+                        + "（finishReason=LENGTH，max-tokens={}，本次输出 {} token，正文{}）。"
+                        + "思考型模型常把预算全花在 reasoning 上，于是正文为空；"
+                        + "请调大 llm.models.<key>.max-tokens / llm.agent.max-tokens 或 @LlmAgent(maxTokens=...)，"
+                        + "或改用不带思考的模型。注意重试与'补写'都救不回来：约束是 token 预算本身。",
+                agentName(), step, maxTokens < 0 ? "未设置" : String.valueOf(maxTokens),
+                outputTokens, blankText ? "为空" : "已截断");
+
+        attributes.put(AgentAttributes.TRUNCATED, Boolean.TRUE);
+        List<Integer> steps = new ArrayList<>();
+        if (attributes.get(AgentAttributes.TRUNCATED_STEPS) instanceof List<?> existing) {
+            for (Object item : existing) {
+                if (item instanceof Integer value) {
+                    steps.add(value);
+                }
+            }
+        }
+        steps.add(step);
+        attributes.put(AgentAttributes.TRUNCATED_STEPS, List.copyOf(steps));
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("agent", agentName());
+        payload.put("step", step);
+        payload.put("maxTokens", maxTokens);
+        payload.put("outputTokens", outputTokens);
+        payload.put("textEmpty", blankText);
+        emit("model.truncated", payload);
     }
 
     @Override

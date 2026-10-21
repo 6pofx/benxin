@@ -920,8 +920,15 @@ r.steps();         // 走了几步
 r.usage();         // token 用量（含缓存与推理 token）
 r.toolCalls();     // 完整工具调用记录（名称/参数/结果/耗时）
 r.maxStepsReached(); // 是否因步数上限中断
-r.attributes();    // 循环写入的统计信息
+r.finishReason();  // 最后一次响应的结束原因（LENGTH = 被 max_tokens 截断）
+r.attributes();    // 循环写入的统计信息（含 benxin.truncated / benxin.truncatedSteps）
 ```
+
+> 被 `max_tokens` 截断时（`finishReason == LENGTH`）插件会打一条 WARN、把
+> `benxin.truncated=true` 与 `benxin.truncatedSteps` 写进 `attributes()`、并广播一个
+> `model.truncated` 自定义事件（`AgentListener#onCustomEvent`）。工作流场景另有
+> `WorkflowRun.truncatedNodes()` 与 `workflow.node-truncated` 事件 —— 因为
+> `AgentResult.finishReason()` 只保留**最后一次**响应，中间节点被截断会被后面的正常响应覆盖掉。
 
 ### 几条容易猜错的行为口径
 
@@ -945,6 +952,8 @@ r.attributes();    // 循环写入的统计信息
 | 工作流预算中断 | `AgentResult.maxStepsReached()` 为 `true`，且 `WorkflowRun.truncated()` 为 `true`（两者不再矛盾） |
 | END 节点的出边 | 永远不会被执行（引擎在 END 处结束推进）→ 加载期打一条 WARN，见下 |
 | 默认 Loop | `llm.agent.default-loop`（显式配置）→ `@LlmLoop(defaultLoop = true)`（多个候选按 `order()` 取最小）→ `dsh-minimal` |
+| 输出被 `max_tokens` 截断（`finishReason == LENGTH`） | 不再是"一点声音都没有"：打 WARN + 写 `benxin.truncated` / `benxin.truncatedSteps` + 广播 `model.truncated`。**会思考的本地模型**把预算全花在 reasoning 上时表现为"正文空、看起来正常结束"，重试/补写都救不回来（约束是 token 预算本身）—— 请调大 `max-tokens` 或换非思考模型 |
+| 工作流里某个中间节点被截断 | `AgentResult.finishReason()` 只保留最后一次响应，看不出中间出过事；改用 `WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`（`attributes()` 里 `benxin.workflow.run`），并有 `workflow.node-truncated` 事件 |
 | `@LlmLoop` / `@LlmGuard` 的扫描范围 | 按**主应用包**扫类路径，**不区分** `src/main` 与 `src/test`：写在主包下的测试夹具会进生产上下文（`@SpringBootTest` 里表现为"多出一堆 Loop/拦截器"）。测试夹具请放到主应用包之外 |
 
 ### HTTP 端点（需显式开启）
@@ -1151,6 +1160,24 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 ## 版本与升级
 
 当前版本 **1.1.1**（上一个发布版本是 `v1.1.0`）。
+
+### 未发布（`feature/workflow-java-node` 分支）
+
+| 项 | 说明 |
+|---|---|
+| **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
+| **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
+
+实测环境（本地 LM Studio，`qwen/qwen3-vl-8b`，`max-tokens: 64`）：
+
+```
+WARN  DefaultLoopContext -- [benxin] Agent [lms-truncation] 第 1 步的输出被 max_tokens 截断
+      （finishReason=LENGTH，max-tokens=64，本次输出 64 token，正文已截断）… 注意重试与'补写'都救不回来
+finishReason=LENGTH / 正文长度=88 / attributes=[benxin.sessionId, benxin.agentName,
+      benxin.truncated, benxin.truncatedSteps]
+WARN  WorkflowLoop -- [workflow:lms-truncation-flow] 有节点输出被 max_tokens 截断：[first]
+最终 finishReason=STOP / 节点截断记录=[first]      ← 只看 AgentResult 是查不出中间节点被截断的
+```
 
 ### 1.1.1：31 条实测缺陷修复
 

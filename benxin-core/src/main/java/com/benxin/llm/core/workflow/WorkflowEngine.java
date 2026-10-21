@@ -77,7 +77,7 @@ public final class WorkflowEngine {
                 runtime.emit("workflow.truncated", event("workflow", definition.name(), "node", node.id(),
                         "executions", executions));
                 return new WorkflowRun(definition.name(), finalOutput.isEmpty() ? state.last() : finalOutput,
-                        visited, executions, true);
+                        visited, executions, true, runtime.truncatedNodes());
             }
 
             visited.add(node.id());
@@ -147,9 +147,11 @@ public final class WorkflowEngine {
             node = definition.require(chosen.to());
         }
 
-        WorkflowRun run = new WorkflowRun(definition.name(), finalOutput, visited, executions, false);
+        WorkflowRun run = new WorkflowRun(definition.name(), finalOutput, visited, executions, false,
+                runtime.truncatedNodes());
         runtime.emit("workflow.end", event("workflow", definition.name(), "executions", executions,
-                "visited", run.visited(), "output", abbreviate(finalOutput)));
+                "visited", run.visited(), "output", abbreviate(finalOutput),
+                "truncatedNodes", run.truncatedNodes()));
         return run;
     }
 

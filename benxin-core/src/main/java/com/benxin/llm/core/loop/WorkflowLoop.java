@@ -164,6 +164,14 @@ public class WorkflowLoop extends AbstractAgentLoop {
             // 会在工作流场景静默漏判。
             markMaxStepsReached(ctx);
         }
+        if (run.hasTruncatedNodes()) {
+            // 节点级截断信号：中间节点被 max_tokens 截断时，最终 finishReason 往往已经被
+            // 后面"正常说完"的节点覆盖成 STOP，只看 AgentResult 是查不出来的。
+            log.warn("[workflow:{}] 有节点输出被 max_tokens 截断：{}（finishReason=LENGTH，"
+                            + "该节点输出可能为空或半截）。请调大 llm.models.<key>.max-tokens "
+                            + "或该节点的 maxSteps / 提示词长度",
+                    resolved.name(), run.truncatedNodes());
+        }
 
         log.debug("[workflow:{}] 执行结束，{} 次节点执行，路径 {}",
                 resolved.name(), run.executions(), run.visited());

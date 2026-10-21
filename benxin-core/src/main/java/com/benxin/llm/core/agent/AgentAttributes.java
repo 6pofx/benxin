@@ -8,7 +8,9 @@ package com.benxin.llm.core.agent;
  *
  * <p>取值口径：{@link #SYSTEM_PROMPT} / {@link #TODOS} / {@link #PLAN} /
  * {@link #DEFAULT_SUB_AGENT} 由对应的组件写入；{@link #SESSION_ID} 与 {@link #AGENT_NAME}
- * 由 {@code DefaultAgent.run} 在运行开始时播种，因此一次运行内所有工具/拦截器都读得到。</p>
+ * 由 {@code DefaultAgent.run} 在运行开始时播种，因此一次运行内所有工具/拦截器都读得到；
+ * {@link #TRUNCATED} / {@link #TRUNCATED_STEPS} 由 {@code DefaultLoopContext} 在
+ * 遇到 {@code finishReason == LENGTH} 时写入。</p>
  */
 public final class AgentAttributes {
 
@@ -34,6 +36,23 @@ public final class AgentAttributes {
 
     /** Agent 名称；由 {@code DefaultAgent.run} 在运行开始时写入。 */
     public static final String AGENT_NAME = "benxin.agentName";
+
+    /**
+     * 本次运行是否出现过"输出被 max_tokens 截断"（{@code finishReason == LENGTH}）。
+     *
+     * <p>值为 {@link Boolean}；任意一步被截断过即为 {@code true}，步数明细见
+     * {@link #TRUNCATED_STEPS}。为什么需要这个键：{@code AgentResult.finishReason()} 只保留
+     * <b>最后一次</b>响应，中间步（工作流里就是中间节点）被截断会被后面正常的响应覆盖掉。</p>
+     */
+    public static final String TRUNCATED = "benxin.truncated";
+
+    /**
+     * 被 max_tokens 截断的步号列表（{@link java.util.List List&lt;Integer&gt;}，按发生顺序追加）。
+     *
+     * <p>思考型模型（reasoning）把输出预算花在思考上时，典型形态是
+     * {@code finish_reason=length} + <b>正文空串</b>，只看最终答案完全看不出发生过什么。</p>
+     */
+    public static final String TRUNCATED_STEPS = "benxin.truncatedSteps";
 
     private AgentAttributes() {
     }
