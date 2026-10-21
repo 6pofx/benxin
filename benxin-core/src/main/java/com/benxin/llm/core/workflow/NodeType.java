@@ -6,9 +6,15 @@ import com.fasterxml.jackson.annotation.JsonValue;
 /**
  * 工作流节点类型。
  *
- * <p>刻意只保留六种：能表达"顺序、分支、循环、汇合"这四件事就已经是本意图灵完备的了，
- * 再多的类型只会让 YAML 变成一门需要另写文档的编程语言。复杂逻辑应当下沉到工具里，
- * 而不是在这层堆节点种类 —— 这是本心一贯的取舍：<b>编排归图，能力归工具</b>。</p>
+ * <p>能表达"顺序、分支、循环、汇合"这四件事就已经是图灵完备的了，因此类型刻意保持很少 ——
+ * 每多一种，YAML 就更接近一门需要另写文档的编程语言。总体主张没变：
+ * <b>编排归图，能力归工具</b>。</p>
+ *
+ * <p>{@link #JAVA} 是唯一的例外，而且它是"为了不再增加类型"才加的：它是一道<b>逃生口</b>。
+ * 当一段逻辑既不适合写成提示词、又不该交给模型当工具用时（业务规则、格式转换、校验、
+ * 与本地系统打交道），就写成一个注册好的处理器挂在 Java 节点上，
+ * 而不是继续往这张枚举里加第七种、第八种节点。它有三个刻意的边界：
+ * 不能调模型、不能调工具、不能直接指定下一条边 —— 详见 {@link WorkflowHandler}。</p>
  *
  * <p>循环不需要专门的节点类型：把边指回上游节点即可，由
  * {@link WorkflowEngine} 的步数预算与单节点访问上限兜底。</p>
@@ -23,6 +29,13 @@ public enum NodeType {
 
     /** 直接调用一个已注册的工具，参数来自 {@code args} 模板。 */
     TOOL("tool"),
+
+    /**
+     * 执行一段宿主注册的本地逻辑：{@code handler} 指向 {@link WorkflowHandlerRegistry} 里的名字。
+     *
+     * <p>面向图而不是模型：不进工具 Schema、不经沙箱与审批，结果可以带回变量。</p>
+     */
+    JAVA("java"),
 
     /** 纯路由节点：自己不产生输出，只按出边的条件挑一条走。 */
     BRANCH("branch"),
@@ -64,12 +77,13 @@ public enum NodeType {
         return switch (value) {
             case "llm", "model", "prompt", "call" -> AGENT;
             case "call-tool", "invoke", "function" -> TOOL;
+            case "handler", "code", "custom", "java-node" -> JAVA;
             case "condition", "switch", "if", "route" -> BRANCH;
             case "assign", "var", "variable" -> SET;
             case "finish", "exit", "result" -> END;
             case "entry", "begin" -> START;
             default -> throw new IllegalArgumentException(
-                    "未知节点类型 [" + raw + "]，可选: start / agent / tool / branch / set / end");
+                    "未知节点类型 [" + raw + "]，可选: start / agent / tool / java / branch / set / end");
         };
     }
 }

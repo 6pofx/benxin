@@ -28,6 +28,7 @@ public final class WorkflowNode {
     private final String prompt;
     private final String instruction;
     private final String tool;
+    private final String handler;
     private final Map<String, Object> args;
     private final Map<String, String> set;
     private final String output;
@@ -42,6 +43,7 @@ public final class WorkflowNode {
         this.prompt = b.prompt;
         this.instruction = b.instruction;
         this.tool = b.tool;
+        this.handler = b.handler;
         this.args = Map.copyOf(b.args);
         this.set = Map.copyOf(b.set);
         this.output = b.output;
@@ -76,6 +78,16 @@ public final class WorkflowNode {
 
     public String tool() {
         return tool;
+    }
+
+    /**
+     * JAVA 节点要执行的处理器名（对应 {@link WorkflowHandlerRegistry} 里的键）。
+     *
+     * <p>刻意是名字而不是类名或方法名：定义只能引用宿主已经注册进来的代码，
+     * 这是"一张 YAML 不至于变成任意代码执行入口"的全部依据。</p>
+     */
+    public String handler() {
+        return handler;
     }
 
     public Map<String, Object> args() {
@@ -129,6 +141,11 @@ public final class WorkflowNode {
                     throw new IllegalArgumentException(where + " 是 tool 节点，必须提供 tool 名称");
                 }
             }
+            case JAVA -> {
+                if (isBlank(handler)) {
+                    throw new IllegalArgumentException(where + " 是 java 节点，必须提供 handler 名称");
+                }
+            }
             case SET -> {
                 if (set.isEmpty()) {
                     throw new IllegalArgumentException(where + " 是 set 节点，必须提供至少一个 set 键值");
@@ -172,6 +189,7 @@ public final class WorkflowNode {
         private String prompt;
         private String instruction;
         private String tool;
+        private String handler;
         private final Map<String, Object> args = new LinkedHashMap<>();
         private final Map<String, String> set = new LinkedHashMap<>();
         private String output;
@@ -206,6 +224,11 @@ public final class WorkflowNode {
 
         public Builder tool(String tool) {
             this.tool = tool;
+            return this;
+        }
+
+        public Builder handler(String handler) {
+            this.handler = handler;
             return this;
         }
 

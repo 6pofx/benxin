@@ -8,8 +8,10 @@ import com.benxin.llm.core.message.ChatMessage;
 import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.support.SampleTools;
 import com.benxin.llm.core.support.ScriptedModel;
+import com.benxin.llm.core.workflow.NodeOutput;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
 import com.benxin.llm.core.workflow.WorkflowException;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.core.workflow.WorkflowIo;
 import com.benxin.llm.core.workflow.WorkflowRun;
 import org.junit.jupiter.api.DisplayName;
@@ -230,5 +232,58 @@ class WorkflowLoopTest {
 
         assertThat(new WorkflowLoop().name()).isEqualTo("workflow");
         assertThat(new WorkflowLoop().description()).contains("benxin.workflow");
+    }
+
+    // ------------------------------------------------------------------
+    // Java 节点
+    // ------------------------------------------------------------------
+
+    private static final String WITH_JAVA = """
+            name: with-java
+            nodes:
+              - id: a
+                type: agent
+                prompt: "请给出要点：${input}"
+              - id: count
+                type: java
+                handler: charCount
+                args:
+                  text: "${a}"
+              - id: done
+                type: end
+                output: "要点=${a}｜字数=${chars}"
+            edges:
+              - from: a
+                to: count
+              - from: count
+                to: done
+            """;
+
+    @Test
+    @DisplayName("java 节点端到端：处理器真的被执行，变量进入最终答案，且不多耗一次模型调用")
+    void executesJavaNodeEndToEnd() {
+        WorkflowHandlerRegistry handlers = new WorkflowHandlerRegistry()
+                .register("charCount", in -> NodeOutput.of("统计完成",
+                        Map.of("chars", in.arg("text").length())));
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("四个字"));
+
+        AgentResult result = agent(
+                WorkflowLoop.named("workflow:with-java", WorkflowIo.read(WITH_JAVA), handlers),
+                model, null).call("写一份要点");
+
+        assertThat(result.text()).isEqualTo("要点=四个字｜字数=3");
+        // Java 节点不产生模型往返：整张图只有 agent 节点那一次
+        assertThat(model.callCount()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("没绑定注册表时引用 handler 会明确报「未注册」，而不是空指针")
+    void failsClearlyWithoutHandlerRegistry() {
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("不该走到这里"));
+
+        assertThatThrownBy(() -> agent(new WorkflowLoop(WorkflowIo.read(WITH_JAVA)), model, null)
+                .call("写一份要点"))
+                .isInstanceOf(WorkflowException.class)
+                .hasMessageContaining("未注册的工作流处理器 [charCount]");
     }
 }

@@ -74,6 +74,15 @@ public final class ScriptedModel implements LlmModel {
                 .build();
     }
 
+    /** 被 max_tokens 截断的响应（{@code finishReason = LENGTH}），正文通常为空或半截。 */
+    public static ChatResponse truncated(String content) {
+        return ChatResponse.builder()
+                .message(ChatMessage.assistant(content))
+                .finishReason(FinishReason.LENGTH)
+                .usage(new Usage(10, 64))
+                .build();
+    }
+
     public static ChatResponse toolCall(String toolName, String argumentsJson) {
         return toolCall("call_" + toolName, toolName, argumentsJson);
     }

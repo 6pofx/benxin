@@ -7,6 +7,7 @@ import com.benxin.llm.core.util.Json;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
 import com.benxin.llm.core.workflow.WorkflowEngine;
 import com.benxin.llm.core.workflow.WorkflowException;
+import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.core.workflow.WorkflowIo;
 import com.benxin.llm.core.workflow.WorkflowRun;
 import com.benxin.llm.core.workflow.WorkflowState;
@@ -64,15 +65,16 @@ public class WorkflowLoop extends AbstractAgentLoop {
 
     private final WorkflowDefinition definition;
     private final String loopName;
+    private final WorkflowHandlerRegistry handlers;
 
     /** 无默认定义：每次运行都必须从属性里拿到定义。 */
     public WorkflowLoop() {
-        this(null, null);
+        this(null, null, null);
     }
 
     /** 绑定一个默认定义；Spring 侧每个 {@code llm.workflows.*} 都这样构造一个实例。 */
     public WorkflowLoop(WorkflowDefinition definition) {
-        this(null, definition);
+        this(null, definition, null);
     }
 
     /**
@@ -82,8 +84,18 @@ public class WorkflowLoop extends AbstractAgentLoop {
      * @param definition 默认定义，可为 null
      */
     public WorkflowLoop(String loopName, WorkflowDefinition definition) {
+        this(loopName, definition, null);
+    }
+
+    /**
+     * @param handlers Java 节点的处理器注册表；图里没有 java 节点时传 null 即可
+     *                 （null 会被换成空表，于是引用 handler 时报的是"未注册"而不是空指针）
+     */
+    public WorkflowLoop(String loopName, WorkflowDefinition definition,
+                        WorkflowHandlerRegistry handlers) {
         this.definition = definition;
         this.loopName = loopName == null || loopName.isBlank() ? null : loopName;
+        this.handlers = handlers == null ? WorkflowHandlerRegistry.empty() : handlers;
     }
 
     public static WorkflowLoop of(WorkflowDefinition definition) {
@@ -96,7 +108,13 @@ public class WorkflowLoop extends AbstractAgentLoop {
      * @param loopName {@code LoopRegistry} 里用的名字（如 {@code workflow:code-review}）
      */
     public static WorkflowLoop named(String loopName, WorkflowDefinition definition) {
-        return new WorkflowLoop(loopName, definition);
+        return new WorkflowLoop(loopName, definition, null);
+    }
+
+    /** 按注册名构造并绑定处理器注册表：Spring 侧每个 {@code llm.workflows.*} 走这条。 */
+    public static WorkflowLoop named(String loopName, WorkflowDefinition definition,
+                                     WorkflowHandlerRegistry handlers) {
+        return new WorkflowLoop(loopName, definition, handlers);
     }
 
     /** 构造时绑定的默认定义（可能为空）。 */
@@ -134,7 +152,7 @@ public class WorkflowLoop extends AbstractAgentLoop {
         log.debug("[workflow:{}] 开始执行，入口节点 [{}]，共 {} 个节点",
                 resolved.name(), resolved.resolveEntry().id(), resolved.nodes().size());
 
-        WorkflowRun run = new WorkflowEngine().run(resolved, state, new LoopContextRuntime(ctx));
+        WorkflowRun run = new WorkflowEngine().run(resolved, state, new LoopContextRuntime(ctx, handlers));
 
         Map<String, Object> attributes = ctx.attributes();
         attributes.put(RUN_ATTRIBUTE, run);
@@ -145,6 +163,14 @@ public class WorkflowLoop extends AbstractAgentLoop {
             // 以前只有工作流漏了这一步，于是"按 maxStepsReached() 统一判断输出是不是半成品"
             // 会在工作流场景静默漏判。
             markMaxStepsReached(ctx);
+        }
+        if (run.hasTruncatedNodes()) {
+            // 节点级截断信号：中间节点被 max_tokens 截断时，最终 finishReason 往往已经被
+            // 后面"正常说完"的节点覆盖成 STOP，只看 AgentResult 是查不出来的。
+            log.warn("[workflow:{}] 有节点输出被 max_tokens 截断：{}（finishReason=LENGTH，"
+                            + "该节点输出可能为空或半截）。请调大 llm.models.<key>.max-tokens "
+                            + "或该节点的 maxSteps / 提示词长度",
+                    resolved.name(), run.truncatedNodes());
         }
 
         log.debug("[workflow:{}] 执行结束，{} 次节点执行，路径 {}",

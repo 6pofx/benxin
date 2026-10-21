@@ -1,5 +1,6 @@
 package com.benxin.llm.core.workflow;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -36,8 +37,34 @@ public interface WorkflowRuntime {
      */
     String callTool(String tool, Map<String, Object> args, WorkflowNode node);
 
+    /**
+     * 执行一个 Java 节点：把请求转给宿主注册的 {@link WorkflowHandler}。
+     *
+     * <p>刻意给了默认实现并默认抛异常：工作流引擎可以继续用"不实现这个方法的假运行时"
+     * 做纯逻辑单测，第三方自己写的 {@code WorkflowRuntime} 也不会因为新增能力而编译失败。
+     * 真正的实现只有 {@code LoopContextRuntime} 一个。</p>
+     *
+     * @param handler 处理器名（来自节点的 {@code handler} 字段）
+     * @param input   已渲染的参数与黑板快照
+     */
+    default NodeOutput callHandler(String handler, NodeInput input, WorkflowNode node) {
+        throw new UnsupportedOperationException(
+                "当前工作流运行时未启用 Java 节点（handler=" + handler + "）。");
+    }
+
     /** 广播一个事件（会转给 {@code AgentListener.onCustomEvent}）。 */
     void emit(String type, Object payload);
+
+    /**
+     * 本次运行中"输出被 {@code max_tokens} 截断"的节点 id（按发生顺序，同一节点可重复）。
+     *
+     * <p>为什么由运行时回答而不是由引擎自己判断：只有真正发起模型调用的那一层看得见
+     * {@code finishReason}；引擎拿到的只是一个字符串，无从知道它是"正常说完"还是"预算用完"。
+     * 默认返回空列表，因此用假运行时做纯逻辑单测的实现不需要关心它。</p>
+     */
+    default List<String> truncatedNodes() {
+        return List.of();
+    }
 
     /** 是否已用完步数预算；引擎在每次推进节点前检查。 */
     boolean outOfBudget();

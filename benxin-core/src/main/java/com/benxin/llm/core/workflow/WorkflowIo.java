@@ -207,6 +207,7 @@ public final class WorkflowIo {
             putIfPresent(item, "instruction", node.instruction());
             putIfPresent(item, "prompt", node.prompt());
             putIfPresent(item, "tool", node.tool());
+            putIfPresent(item, "handler", node.handler());
             if (!node.args().isEmpty()) {
                 item.put("args", node.args());
             }

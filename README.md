@@ -14,7 +14,7 @@ public interface WeatherAssistant {
 @Autowired WeatherAssistant assistant;   // 注入即用
 ```
 
-> **想看完整示例？** 配套仓库 [**`benxin_example`**](https://github.com/6pofx/benxin_example)
+> **想看完整示例？** 示例应用**不在本仓库** —— 配套仓库 [**`benxin_example`**](https://github.com/6pofx/benxin_example)
 > 用 12 个可独立运行的 Spring Boot 子项目、794 个离线用例，把下面每一个切面都演示了一遍。
 
 ---
@@ -31,8 +31,7 @@ public interface WeatherAssistant {
 - [替换任意一个切面](#替换任意一个切面)
 - [可观测性](#可观测性)
 - [模块结构](#模块结构)
-- [运行示例](#运行示例)
-- [完整示例工程](#完整示例工程)
+- [示例工程](#示例工程)
 - [设计取舍](#设计取舍)
 - [版本与升级](#版本与升级)
 
@@ -551,8 +550,9 @@ public interface ReleaseNoteWriter {
 }
 ```
 
-**六种节点**：`start`（透传输入）、`agent`（一次模型子任务）、`tool`（直调工具）、
-`branch`（按条件路由）、`set`（写变量）、`end`（产出最终答案）。
+**七种节点**：`start`（透传输入）、`agent`（一次模型子任务）、`tool`（直调工具）、
+`java`（执行宿主注册的本地逻辑，见下）、`branch`（按条件路由）、`set`（写变量）、
+`end`（产出最终答案）。
 **循环不需要专门的节点**：把边指回上游即可。
 
 **条件表达式**是一小门贴近自然语言的语言，支持 `==` `!=` `>` `>=` `<` `<=`
@@ -601,6 +601,50 @@ ${summary} is not empty
 ```java
 agent.call(input, sessionId, Map.of("benxin.workflow", yamlOrJsonText), stream);
 ```
+
+#### Java 节点：把一段本地逻辑放进图里
+
+有些步骤既不该写成提示词，也不该交给模型当工具用 —— 业务规则、格式转换、校验、
+跟本地系统打交道。这类逻辑用一个**注册好的处理器**挂在 `java` 节点上：
+
+```java
+@Component
+@LlmNode("text-stats")                       // 名字就是工作流里 handler: 引用的名字
+public class TextStatsHandler implements WorkflowHandler {
+    @Override
+    public NodeOutput handle(NodeInput input) {
+        String text = input.arg("text");      // args 已经渲染过 ${...}
+        return NodeOutput.of("字数 " + text.length(),
+                Map.of("lengthLevel", text.length() > 400 ? "偏长" : "合适"));
+    }
+}
+```
+
+```yaml
+- id: stats
+  type: java
+  handler: text-stats
+  args:
+    text: "${classify}"          # 和 tool 节点一样会被渲染
+
+- id: report
+  type: end
+  output: "篇幅：${stats}\n判定：${lengthLevel}"   # ${stats} 是文本通道，${lengthLevel} 是变量通道
+```
+
+**两条输出通道**：`NodeOutput.of(text)` 只给文本；`NodeOutput.of(text, vars)` 同时写回变量；
+`NodeOutput.vars(vars)` 只写变量；`NodeOutput.none()` 什么都不产出（像 `branch` / `set`
+那样不覆盖 `${last}`）。节点 id 那个键永远代表它自己的输出，返回同名变量不会把它顶掉。
+
+**三个刻意的边界**：处理器**不能调模型、不能调工具、不能直接指定下一条边**。
+需要模型就用 `agent` 节点，需要工具就用 `tool` 节点，路由交给出边的条件表达式 ——
+图的可见性与可审计性正来自于"模型与工具只在被点名的地方出现"。
+
+**信任边界**：处理器是宿主自己编译并注册的代码，等同于应用自己的 service，
+因此**不经过** `ToolSandbox` 与审批。安全性来自注册制本身 ——
+定义里只能点名这里已有的东西；反射形式的 `class` / `method` 被刻意排除，
+否则一份工作流定义就成了任意代码执行入口。所以定义引用不存在的处理器时，
+Spring 侧会在**启动期**失败并列出已注册清单，而不是等任务跑到一半才炸。
 
 ### 二、结构化编排：`staged` —— 流程固化在代码里
 
@@ -875,8 +919,15 @@ r.steps();         // 走了几步
 r.usage();         // token 用量（含缓存与推理 token）
 r.toolCalls();     // 完整工具调用记录（名称/参数/结果/耗时）
 r.maxStepsReached(); // 是否因步数上限中断
-r.attributes();    // 循环写入的统计信息
+r.finishReason();  // 最后一次响应的结束原因（LENGTH = 被 max_tokens 截断）
+r.attributes();    // 循环写入的统计信息（含 benxin.truncated / benxin.truncatedSteps）
 ```
+
+> 被 `max_tokens` 截断时（`finishReason == LENGTH`）插件会打一条 WARN、把
+> `benxin.truncated=true` 与 `benxin.truncatedSteps` 写进 `attributes()`、并广播一个
+> `model.truncated` 自定义事件（`AgentListener#onCustomEvent`）。工作流场景另有
+> `WorkflowRun.truncatedNodes()` 与 `workflow.node-truncated` 事件 —— 因为
+> `AgentResult.finishReason()` 只保留**最后一次**响应，中间节点被截断会被后面的正常响应覆盖掉。
 
 ### 几条容易猜错的行为口径
 
@@ -900,6 +951,8 @@ r.attributes();    // 循环写入的统计信息
 | 工作流预算中断 | `AgentResult.maxStepsReached()` 为 `true`，且 `WorkflowRun.truncated()` 为 `true`（两者不再矛盾） |
 | END 节点的出边 | 永远不会被执行（引擎在 END 处结束推进）→ 加载期打一条 WARN，见下 |
 | 默认 Loop | `llm.agent.default-loop`（显式配置）→ `@LlmLoop(defaultLoop = true)`（多个候选按 `order()` 取最小）→ `dsh-minimal` |
+| 输出被 `max_tokens` 截断（`finishReason == LENGTH`） | 不再是"一点声音都没有"：打 WARN + 写 `benxin.truncated` / `benxin.truncatedSteps` + 广播 `model.truncated`。**会思考的本地模型**把预算全花在 reasoning 上时表现为"正文空、看起来正常结束"，重试/补写都救不回来（约束是 token 预算本身）—— 请调大 `max-tokens` 或换非思考模型 |
+| 工作流里某个中间节点被截断 | `AgentResult.finishReason()` 只保留最后一次响应，看不出中间出过事；改用 `WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`（`attributes()` 里 `benxin.workflow.run`），并有 `workflow.node-truncated` 事件 |
 | `@LlmLoop` / `@LlmGuard` 的扫描范围 | 按**主应用包**扫类路径，**不区分** `src/main` 与 `src/test`：写在主包下的测试夹具会进生产上下文（`@SpringBootTest` 里表现为"多出一堆 Loop/拦截器"）。测试夹具请放到主应用包之外 |
 
 ### HTTP 端点（需显式开启）
@@ -945,133 +998,70 @@ benxin/
 │   └── com.benxin.llm.core
 │       ├── annotation/           @LlmAgent @LlmLoop @LlmTool @SystemPrompt ...
 │       ├── message/ chat/        统一消息与请求/响应模型
-│       ├── protocol/             三协议编解码 + SSE 解析
+│       ├── protocol/             四协议编解码（openai / anthropic / gemini / responses）+ SSE 解析
 │       ├── transport/            HttpTransport + HttpLlmModel
 │       ├── model/                LlmModel / ModelRegistry / ModelFactory
 │       ├── tool/ sandbox/        工具抽象、反射适配、JSON Schema、沙箱、审批
 │       ├── tool/builtin/         8 个内置工具
-│       ├── loop/                 AgentLoop、AbstractAgentLoop、6 个内置 Loop
+│       ├── loop/                 AgentLoop、AbstractAgentLoop、8 个内置 Loop（含 workflow / staged）
+│       ├── workflow/             声明式工作流：图模型、引擎、条件表达式、YAML/JSON 读写、Java 节点
 │       ├── agent/                Agent 运行时与装配器
 │       ├── context/ memory/ prompt/ hook/   上下文、记忆、提示词、拦截器、监听器
 │
-├── benxin-spring-boot-starter/   Spring 集成
-│   └── com.benxin.llm.spring
-│       ├── LlmProperties         llm.* 配置绑定
-│       ├── LlmAutoConfiguration  全部组件的条件装配
-│       ├── LlmToolCatalog        @LlmTool 扫描（BeanPostProcessor）
-│       ├── LlmAgentFactory       注解 + 配置 + 容器 → Agent
-│       ├── LlmAgentRegistrar     @LlmAgent 接口扫描与代理注册
-│       └── LlmAgentController    可选 HTTP/SSE 端点
-│
-└── benxin-examples/              可运行示例（内置离线 Mock 模型）
+└── benxin-spring-boot-starter/   Spring 集成
+    └── com.benxin.llm.spring
+        ├── LlmProperties         llm.* 配置绑定
+        ├── LlmAutoConfiguration  全部组件的条件装配
+        ├── LlmToolCatalog        @LlmTool 扫描（BeanPostProcessor）
+        ├── LlmAgentFactory       注解 + 配置 + 容器 → Agent
+        ├── LlmAgentRegistrar     @LlmAgent 接口扫描与代理注册
+        └── LlmAgentController    可选 HTTP/SSE 端点
 ```
+
+> 可运行的示例应用不在本仓库 —— 见[示例工程](#示例工程)。
 
 ---
 
-## 运行示例
+## 示例工程
 
-```bash
-cd benxin
-mvn -o clean install          # 构建三个模块并装入本地仓库
-cd benxin-examples
-mvn -o spring-boot:run        # 启动即打印 7 个演示
-```
-
-或者直接跑打好的可执行包：
-
-```bash
-java -jar benxin-examples/target/benxin-examples-1.1.1.jar
-```
-
-示例默认使用**离线 Mock 模型**：不联网、不花钱，但完整跑通
-"模型决策 → 工具调用 → 结果回灌 → 收尾"的全链路，含流式输出。
-实测输出（节选）：
-
-```
-① 声明式调用 —— @LlmAgent 接口直接注入
-   [mock] 第 1 次调用：历史 3 条，工具 3 个，已有工具结果=false
-   [benxin] 调用工具 get_weather 参数={"city":"北京","unit":"celsius"}
-   [benxin] Agent [weatherAssistant] 结束，2 步，67 ms，token 300/130
-
-③ 自定义 Loop —— 一个 @LlmLoop 注解就被注册进框架
-   [benxin] 注册自定义 Loop [step-by-step] ← ...StepByStepLoop
-   [step-by-step] 模型复述：……
-   会话历史条数: 7
-
-④ 流式输出 —— 增量实时到达
-   （逐字打印）共收到 195 个字符的增量
-
-⑤ 强类型返回 —— 模型输出直接变成 Java 对象
-   总评: 示例代码整体结构清晰……
-   评分: 78
-   拦截器统计: 运行 5 次 / 工具 3 次（仅 codeReviewer 生效）
-
-⑥ 程序化组装 —— 不用注解也能换掉任意组件
-   装配结果: Agent[manual-agent → react / mock / 工具 [get_current_time, calculate, get_weather]]
-
-⑦ 声明式工作流 —— 图写在 YAML 里，模型只负责填内容
-   路径: begin → classify → route → urgent → stamp-urgent → stamp → report
-```
-
-示例应用同时开启了 HTTP 层（`llm.web.enabled=true`），可直接验证：
-
-```bash
-curl http://localhost:8080/llm/agents
-curl http://localhost:8080/llm/loops
-curl -X POST http://localhost:8080/llm/agents/weatherAssistant/chat \
-     -H "Content-Type: application/json" \
-     -d '{"message":"北京天气怎么样？","sessionId":"demo"}'
-curl -N "http://localhost:8080/llm/agents/weatherAssistant/stream?message=现在几点"
-```
-
-SSE 端点实测输出：
-
-```
-event:tool_call
-data:{"name":"get_current_time","arguments":"{}"}
-
-event:delta
-data:{"text":"根据工具返回的结果："}
-
-event:done
-data:{"agent":"weatherAssistant","steps":2,"usage":{...},"toolCalls":[...]}
-```
-
-接真实模型：
-
-```bash
-set DEEPSEEK_KEY=sk-xxx
-mvn -o spring-boot:run -Dspring-boot.run.profiles=real
-```
-
-示例覆盖：声明式调用、工具闭环、自定义 Loop、流式输出、强类型返回值、
-程序化组装（不用注解也能换掉任意组件）、拦截器生效范围、**声明式工作流**。
-
----
-
-## 完整示例工程
-
-上面这个 `benxin-examples` 的定位是"5 分钟看清骨架"。要把**每个切面都演示到、并且每条结论都被断言钉住**
-的版本在配套仓库 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)：
-
-| | `benxin-examples`（本仓库） | [`benxin_example`](https://github.com/6pofx/benxin_example)（配套示例） |
-|---|---|---|
-| 形态 | 1 个应用 / 7 个演示 | **12 个可独立启动的 Spring Boot 子项目** + 1 个共享离线模块 |
-| 用例 | 冒烟跑通 | **794 个** `@SpringBootTest` 断言 |
-| 适合 | 先跑一遍，看清整体结构 | 逐切面查阅、升级前后做回归 |
-
-它把本 README 里提到的能力几乎都演示了一遍：注解全属性、内置 Agent Loop（含 `workflow` / `staged`
-两种编排）、四种协议的**线级报文**、沙箱与四种审批、上下文压缩与分词估算、监听器与拦截器全回调、
-逐个切面的 bean 覆盖、MySQL 持久化、真实 DeepSeek 联调，以及本机小模型（LM Studio + Qwen3-VL）的**视觉**演示。
+本仓库只含两个库模块：`benxin-core` 与 `benxin-spring-boot-starter`。
+**可运行的示例应用独立成一个仓库** —— [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)：
+12 个可独立启动的 Spring Boot 子项目 + 1 个共享的离线基础设施模块，
+**794 个 `@SpringBootTest` 用例**把它演示的每一句话都钉成回归断言，默认离线、零 token。
 
 ```bash
 git clone https://github.com/6pofx/benxin_example.git
 cd benxin_example
-mvn test          # 794 个用例，默认离线、零 token
+mvn test                             # 794 个用例，默认离线、零 token
+cd exp-01-declarative-agent
+mvn spring-boot:run                  # 任意子项目都能单独启动
 ```
+
+> 示例工程依赖 `benxin` 的两个产物。若本地还没有发布版，先在**本仓库**执行
+> `mvn -o install -DskipTests` 把它装进本地 Maven 仓库。
+
+它把本 README 提到的能力几乎都演示了一遍：注解全属性、8 个内置 Agent Loop（含 `workflow` /
+`staged` 两条编排路线，以及工作流的 `java` 节点）、四种协议的**线级报文**、沙箱与四种审批、
+上下文压缩与分词估算、监听器与拦截器全回调、逐个切面的 bean 覆盖、MySQL 持久化、
+真实 DeepSeek 联调，以及本机小模型（LM Studio + Qwen3-VL）的**视觉**演示。
 
 > 这个工程同时是 1.1.1 这轮修复的来源：它实测上报了 31 条缺陷（本版本修复了 30 条），
 > 修复后对应断言被翻转成"钉住新行为"，因此那 794 个用例现在也是本项目的兼容性回归套件。
+
+**示例为什么不放在本仓库里？** 库的发布产物只有两个 jar，而示例要跟着演示需求频繁改动、
+还要能引用任意历史版本做升级回归。放在同一个 reactor 里会让"引用这个库"与"跑这个 demo"耦合；
+拆开之后示例可以独立发版、独立 CI，库这边则只剩"稳定"这一个目标。
+
+> 上一版仓库里的 `benxin-examples`（单应用 / 8 个演示）已移除：它的能力被上面的示例工程
+> 完整覆盖，而且每条都有断言。
+
+只想先确认这个库能跑起来：
+
+```bash
+git clone https://github.com/6pofx/benxin.git
+cd benxin
+mvn -o test                          # 260 个离线用例，不联网、不花钱
+```
 
 ---
 
@@ -1106,6 +1096,25 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 ## 版本与升级
 
 当前版本 **1.1.1**（上一个发布版本是 `v1.1.0`）。
+
+### 未发布（`feature/workflow-java-node` 分支）
+
+| 项 | 说明 |
+|---|---|
+| **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
+| **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
+| **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
+
+实测环境（本地 LM Studio，`qwen/qwen3-vl-8b`，`max-tokens: 64`）：
+
+```
+WARN  DefaultLoopContext -- [benxin] Agent [lms-truncation] 第 1 步的输出被 max_tokens 截断
+      （finishReason=LENGTH，max-tokens=64，本次输出 64 token，正文已截断）… 注意重试与'补写'都救不回来
+finishReason=LENGTH / 正文长度=88 / attributes=[benxin.sessionId, benxin.agentName,
+      benxin.truncated, benxin.truncatedSteps]
+WARN  WorkflowLoop -- [workflow:lms-truncation-flow] 有节点输出被 max_tokens 截断：[first]
+最终 finishReason=STOP / 节点截断记录=[first]      ← 只看 AgentResult 是查不出中间节点被截断的
+```
 
 ### 1.1.1：31 条实测缺陷修复
 
@@ -1150,7 +1159,7 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 |---|---|
 | **四个内置协议** | 除 openai / anthropic / gemini 外新增 **OpenAI Responses API**（`protocol: responses`）—— `input[]` item 列表、顶层 `instructions`、扁平 `tools[]`、命名 SSE 事件 |
 | **协议扩展点** | `Protocol` 由封闭枚举改为**可扩展标识类型** + 新增 `ProtocolRegistry`：注册一个 `ProtocolCodec` bean 就能在配置里写 `protocol: bedrock`，见[加自己的协议](#加自己的协议) |
-| **工作流模式** | 两个新 Loop：`workflow`（声明式图编排，六种节点 + 条件表达式 + `${}` 模板）与 `staged`（规划 → 执行 → 验收 → 修复 → 汇总） |
+| **工作流模式** | 两个新 Loop：`workflow`（声明式图编排，七种节点 + 条件表达式 + `${}` 模板 + 注册制 Java 节点）与 `staged`（规划 → 执行 → 验收 → 修复 → 汇总） |
 | **枚举之外的 Loop** | 内置 Loop 增至 8 个（`dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged`） |
 | **子代理可观测** | 子代理用量补记进父上下文；新增 `SubAgentObserver` 观察点，自定义 Loop 能在真实派生路径上收到通知 |
 | **46 条实测缺陷修复** | 由独立集成测试工程 `benxin_test`（493 个测试）逐条实测并复验 |
@@ -1194,7 +1203,7 @@ cd benxin
 mvn -o test
 ```
 
-**244 个测试全部通过**（benxin-core 191 / starter 39 / examples 14，共 19 个测试类），
+**260 个测试全部通过**（benxin-core 216 / starter 44，共 21 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1230,16 +1239,18 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `ToolScannerTest` | 6 | 注解扫描、方法名兜底、参数绑定与默认值、`ToolContext` 注入、异常转错误、DTO 序列化 |
 | `JsonSchemaGeneratorTest` | 6 | 类型映射、枚举、集合、嵌套 POJO、`Optional` 解包、required 规则 |
 | `AgentRuntimeTest` | 18 | 工具闭环、未知工具、沙箱拒绝、审批拒绝与放行、拦截器短路与改写、`returnDirect`、步数上限、记忆、生命周期事件、**并行结果顺序**、超时、结果截断、用量累计、`toBuilder` 隔离 |
+| `TruncationSignalTest` | 2 | 输出被 `max_tokens` 截断时的可见信号：WARN、`benxin.truncated` 属性、`model.truncated` 事件、工作流节点级截断记录 |
 | `ConditionsTest` | 28 | 工作流条件表达式：全部运算符、`not/and/or` 与括号、`is empty` / `exists` / `missing`、语法错误提示 |
-| `WorkflowEngineTest` | 21 | 六种节点、边序即优先级、回边循环、`maxVisitsPerNode` 护栏、节点 `retry`、`continueOnError` 补偿、预算中断 |
-| `WorkflowIoTest` | 18 | YAML/JSON 读写往返、缺字段与非法字段的加载期报错、`retry` / `maxStepsPerNode` 解析 |
+| `WorkflowEngineTest` | 21 | 七种内置节点、边序即优先级、回边循环、`maxVisitsPerNode` 护栏、节点 `retry`、`continueOnError` 补偿、预算中断 |
+| `WorkflowIoTest` | 21 | YAML/JSON 读写往返（含 `handler`）、缺字段与非法字段的加载期报错、节点类型别名、`retry` / `maxStepsPerNode` 解析 |
 | `StagedLoopTest` | 10 | 规划 → 执行 → 验收 → 修复 → 汇总；关掉验收后退化为「带汇总的 plan-execute」 |
-| `WorkflowLoopTest` | 9 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes |
+| `WorkflowLoopTest` | 11 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes、`java` 节点端到端 |
+| `WorkflowHandlerRegistryTest` | 8 | `@LlmNode` 上的名字即唯一契约、缺注解报错、缺处理器时列出可用清单、同名后设者胜 |
+| `WorkflowJavaNodeTest` | 10 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、变量保型、重试与补偿、可作循环体 |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
-| `LlmAutoConfigurationTest` | 22 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）** |
+| `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |
 | `LlmAgentProxyTest` | 17 | **注解接口 → 代理 → 运行时 → 模型** 全链路：参数语义、`@Ctx` 不泄漏、`@SystemPrompt` 渲染、DTO 返回、流式回调、多轮记忆、工具装配、单例与 Object 方法 |
-| `BenxinExampleApplicationTest` | 14 | 示例应用装配：6 个 Agent、7 个 Loop、离线模型、工具扫描、安全默认值、声明式工作流 |
 
 ---
 
