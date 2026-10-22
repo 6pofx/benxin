@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonPOJOBuilder;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -38,6 +40,7 @@ public final class WorkflowNode {
     private final int retry;
     private final boolean continueOnError;
     private final int maxSteps;
+    private final List<String> choice;
 
     private WorkflowNode(Builder b) {
         this.id = b.id == null ? null : b.id.trim();
@@ -55,6 +58,7 @@ public final class WorkflowNode {
         this.retry = Math.max(0, b.retry);
         this.continueOnError = b.continueOnError;
         this.maxSteps = b.maxSteps;
+        this.choice = List.copyOf(b.choice);
     }
 
     public static Builder builder(String id) {
@@ -147,6 +151,17 @@ public final class WorkflowNode {
     }
 
     /**
+     * AGENT 节点的<b>输出契约</b>：模型这次必须只吐出其中一个值。
+     *
+     * <p>空表示没有契约（模型想说什么说什么）。非空时由运行时做<b>归一化 + 判定 + 纠正重试</b>，
+     * 见 {@link ChoiceContract} —— 这一步不是提示词，是代码校验：模型加了标点、套了 Markdown、
+     * 先客气一句，都会在这里被剥掉或打回重答；重试用尽仍不合规，节点直接失败。</p>
+     */
+    public List<String> choice() {
+        return choice;
+    }
+
+    /**
      * 加载期校验：宁可在这里报一句清楚的话，也不要等到跑了一半才崩。
      *
      * @param where 出错位置的前缀（如 {@code 工作流 [review] 的节点 [analyze]}），便于定位
@@ -163,6 +178,11 @@ public final class WorkflowNode {
             case AGENT -> {
                 if (isBlank(prompt)) {
                     throw new IllegalArgumentException(where + " 是 agent 节点，必须提供 prompt");
+                }
+                for (String allowed : choice) {
+                    if (allowed == null || allowed.isBlank()) {
+                        throw new IllegalArgumentException(where + " 的 choice 里不能有空值");
+                    }
                 }
             }
             case TOOL -> {
@@ -189,6 +209,10 @@ public final class WorkflowNode {
             case END, START, BRANCH -> {
                 // 三者都可以不带任何参数：START 透传输入，BRANCH 只看出边，END 回退到"上一节点输出"
             }
+        }
+        if (type != NodeType.AGENT && !choice.isEmpty()) {
+            throw new IllegalArgumentException(where + " 的类型是 " + type.wireName()
+                    + "，只有 agent 节点支持 choice（输出枚举契约）");
         }
     }
 
@@ -233,6 +257,7 @@ public final class WorkflowNode {
         private int retry;
         private boolean continueOnError;
         private int maxSteps = -1;
+        private final List<String> choice = new ArrayList<>();
 
         public Builder id(String id) {
             this.id = id;
@@ -314,6 +339,14 @@ public final class WorkflowNode {
 
         public Builder maxSteps(int maxSteps) {
             this.maxSteps = maxSteps;
+            return this;
+        }
+
+        public Builder choice(List<String> choice) {
+            this.choice.clear();
+            if (choice != null) {
+                this.choice.addAll(choice);
+            }
             return this;
         }
 

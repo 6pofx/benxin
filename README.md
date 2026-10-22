@@ -703,8 +703,8 @@ WorkflowDefinition flow = JavaFlow.builder("review")
 ```
 
 > **想看一张完整的图？** `OrderApprovalFlowTest` 把一份 **26 节点 / 31 边 / 4 个终点**的订单审核流程
-> 用这套 DSL 原样写了出来，并用 5 个场景（校验失败 / 驳回 / 补充材料回边 / 超时关闭 /
-> 重提回边）把每条路径都跑了一遍、把 `visited` 逐节点断言住。
+> 用这套 DSL 原样写了出来（分段成五个方法），并用 6 个场景（校验失败 / 驳回 / 补充材料回边 / 超时关闭 /
+> 重提回边 / 模型不听话）把每条路径都跑了一遍、把 `visited` 逐节点断言住。
 
 **回边与多终点**：把边指回上游节点就是循环，多个 `end` 节点就是多个出口。
 "材料不合格 → 补材料 → 重新进审核"这种回流直接写就行：
@@ -755,6 +755,37 @@ WorkflowDefinition flow = JavaFlow.builder("review")
 `maxVisitsPerNode` 护栏、`retry` / `continueOnError`、预算中断、事件与变量回写，
 与 YAML 模式完全一致 —— 换写法不用重学一套语义。`branchOn` 也只是糖：
 它产出的仍是一个 `branch` 节点加若干条谓词边，引擎一行没改。
+
+**输出契约：分支判定不能只靠提示词约定。** 模型会在答案前后加句号、套 `**`、包进 Markdown 代码块、
+先客气一句"好的，我的结论是……"，这些都会让字符串分支静默走错。给 agent 节点声明 `choice` 之后，
+校验由框架执行，而不是指望模型听话：
+
+```java
+.agent("F", "你是风控审核员", "请给出风控审核结论：\n${last}",
+       "通过", "驳回", "需补充材料")          // ← 输出契约
+```
+
+运行时三步：**归一化**（去围栏/加粗/引号/尾标点/"结论："前缀）→ **判定**（精确匹配，或唯一子串匹配；
+"不通过"绝不算"通过"）→ **纠正重试**（追加一条"只能输出这三个词之一"，最多两次），仍不合规就让
+**节点失败**。所以 `${F}` 里永远是干净的枚举值，`caseOf` 的精确匹配才有保障 ——
+宁可失败，也不把模糊答案当枚举值塞进图里。
+
+**可读性：分段 + 导出图。** 一张 26 节点的图写成一条长链没人读得动。两个办法：
+
+1. **一段一个方法**：`intake(flow)` / `riskControl(flow)` / `rework(flow)` / `approval(flow)` / `timeout(flow)`，
+   主方法只剩六行，方法名就是这段图在做什么；`describe(id, "…")` 给节点补一句说明（纯展示，不影响语义）。
+2. **把图导回去对**：`Mermaid.toMermaid(flow)` 输出 `flowchart TD`，节点形状按类型（开始/结束=胶囊、
+   分支=菱形、动作=矩形），分支边的标签直接取自 `caseOf` —— 代码与设计稿可以逐行比对：
+
+```java
+String mermaid = Mermaid.toMermaid(orderApproval());   // 粘到任何支持 Mermaid 的地方
+```
+
+**上下文怎么走。** 节点提示词不是"替换历史"，而是**追加**进同一条对话：每次 `callModel` 发的都是
+整份历史（含此前所有节点、工具调用与结果），所以下游节点看到的是完整上文，不会只剩一个"通过"。
+要留意的是另外两点：① 长流程会让历史持续变长，逼近预算时上下文管理器会**压缩**，早期细节可能被摘要掉；
+② 提示词里引用 `${last}` 只是"提醒模型看这句"，不等于"只给它这句"。
+稳妥的写法是**该传的事实用变量显式传**（`${amount}`、`${verdict}`），别指望模型从二十轮历史里自己捞。
 
 ### 三、结构化编排：`staged` —— 流程固化在代码里
 
@@ -1170,7 +1201,7 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 ```bash
 git clone https://github.com/6pofx/benxin.git
 cd benxin
-mvn -o test                          # 293 个离线用例，不联网、不花钱
+mvn -o test                          # 306 个离线用例，不联网、不花钱
 ```
 
 ---
@@ -1216,6 +1247,9 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 | **`branchOn`：多出口分支** | `caseOf` 精确匹配 / `whenContains` 子串匹配 / `otherwise` 兜底，编译成一个 `branch` 节点加若干谓词边（引擎未改）。精确匹配专治"通过 vs 不通过"的子串误命中 |
 | **`routeFrom`：判定节点直接分叉** | 判断节点自己产出结论时（Mermaid 的菱形常既是"审核"又是"分流"），分叉边直接挂在这个节点上，不再多插一个纯路由节点，`${last}` 也不会多一层 |
 | **真实流程图示例** | `OrderApprovalFlowTest`：订单审核流程 26 节点 / 31 边 / 4 终点 / 2 回边，5 个场景逐节点断言执行路径 |
+| **输出契约 `choice`** | agent 节点声明"只能吐这几个值"，由框架做归一化（Markdown/标点/客气话）+ 纠正重试（最多 2 次）+ 用尽即失败。分支判定不再依赖"模型照做" |
+| **`Mermaid.toMermaid`** | 把代码里的图导回 `flowchart TD`（形状按节点类型、边标签取自 `caseOf`），用于代码与设计稿互查 |
+| **`describe(id, …)`** | 给节点补一句说明：只影响导出的图与可读性，不参与任何运行时语义 |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
 | **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
@@ -1318,7 +1352,7 @@ cd benxin
 mvn -o test
 ```
 
-**293 个测试全部通过**（benxin-core 249 / starter 44，共 24 个测试类），
+**306 个测试全部通过**（benxin-core 262 / starter 44，共 25 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1363,8 +1397,9 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `WorkflowHandlerRegistryTest` | 8 | `@LlmNode` 上的名字即唯一契约、缺注解报错、缺处理器时列出可用清单、同名后设者胜 |
 | `WorkflowJavaNodeTest` | 10 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、变量保型、重试与补偿、可作循环体 |
 | `JavaFlowTest` | 20 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝、`branchOn` 精确匹配（含"通过/不通过"子串坑）与兜底 |
-| `CodeFlowLoopTest` | 7 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册、**节点级系统提示词真的走系统通道**、**三出口 + 回边 + 多终点** |
-| `OrderApprovalFlowTest` | 6 | **一张完整的真实流程图**（订单审核，26 节点 / 31 边 / 4 终点 / 2 回边）：5 个场景逐节点断言 `visited`，外加图结构断言（并行支线 T/U/V 未出现） |
+| `CodeFlowLoopTest` | 11 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册、**节点级系统提示词真的走系统通道**、**三出口 + 回边 + 多终点**、**输出契约**（Markdown/客气话归一化、纠正重试、重试用尽即失败） |
+| `ChoiceContractTest` | 7 | 输出契约的判定规则：围栏/加粗/引号/尾标点/"结论："前缀、"不通过"不算"通过"、互为子串取最具体、判不出来就返回 null |
+| `OrderApprovalFlowTest` | 8 | **一张完整的真实流程图**（订单审核，26 节点 / 31 边 / 4 终点 / 2 回边）：5 个场景逐节点断言 `visited`、模型不听话也不走错路、**导出 Mermaid 与设计稿同构**、并行支线 T/U/V 未出现 |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
 | `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |

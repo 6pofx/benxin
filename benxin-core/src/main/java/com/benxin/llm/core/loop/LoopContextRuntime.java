@@ -7,6 +7,8 @@ import com.benxin.llm.core.message.Role;
 import com.benxin.llm.core.message.ToolUsePart;
 import com.benxin.llm.core.tool.ToolCallback;
 import com.benxin.llm.core.tool.ToolResult;
+import com.benxin.llm.core.util.Json;
+import com.benxin.llm.core.workflow.ChoiceContract;
 import com.benxin.llm.core.workflow.NodeInput;
 import com.benxin.llm.core.workflow.NodeOutput;
 import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
@@ -58,6 +60,43 @@ public final class LoopContextRuntime implements WorkflowRuntime {
     @Override
     public String callAgent(String system, String prompt, WorkflowNode node) {
         ctx.append(ChatMessage.user(prompt));
+        String text = runAgentTurns(system, node);
+
+        List<String> choices = node.choice();
+        if (choices.isEmpty()) {
+            return text;
+        }
+        // 输出契约：归一化 → 判定 → 不合规就纠正重试 → 用尽则让节点失败。
+        // 刻意把"判不出来"当成失败，而不是把模糊答案塞进图里让下游猜。
+        for (int attempt = 0; ; attempt++) {
+            String matched = ChoiceContract.match(text, choices);
+            if (matched != null) {
+                return matched;
+            }
+            if (attempt >= ChoiceContract.DEFAULT_RETRIES || outOfBudget()) {
+                String why = attempt >= ChoiceContract.DEFAULT_RETRIES
+                        ? "已重试 " + attempt + " 次"
+                        : "步数预算已耗尽，无法纠正重试";
+                throw new IllegalStateException("节点 [" + node.id() + "] 的输出不在契约 " + choices
+                        + " 里（" + why + "）：" + Json.abbreviate(text));
+            }
+            ctx.emit("workflow.choice-retry", Map.of(
+                    "node", node.id(),
+                    "attempt", attempt + 1,
+                    "allowed", choices,
+                    "raw", Json.abbreviate(text)));
+            ctx.append(ChatMessage.user(ChoiceContract.correction(choices)));
+            text = runAgentTurns(system, node);
+        }
+    }
+
+    /**
+     * 推进到"模型不再请求工具"为止，返回模型最后一段文本。
+     *
+     * <p>抽出来是为了让输出契约的纠正重试能复用同一段推进逻辑 ——
+     * 重试时不应该再追加一遍原始提示词（它已经在历史里了），只追加纠正消息。</p>
+     */
+    private String runAgentTurns(String system, WorkflowNode node) {
         int nodeLimit = node.maxSteps() > 0 ? node.maxSteps() : Integer.MAX_VALUE;
         int calls = 0;
 

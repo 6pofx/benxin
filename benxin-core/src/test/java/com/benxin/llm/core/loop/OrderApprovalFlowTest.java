@@ -5,6 +5,7 @@ import com.benxin.llm.core.agent.AgentResult;
 import com.benxin.llm.core.support.ScriptedModel;
 import com.benxin.llm.core.util.Json;
 import com.benxin.llm.core.workflow.JavaFlow;
+import com.benxin.llm.core.workflow.Mermaid;
 import com.benxin.llm.core.workflow.NodeInput;
 import com.benxin.llm.core.workflow.NodeOutput;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
@@ -23,20 +24,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 一张真实的<b>订单审核流程图</b>，用 {@link JavaFlow} 原样编码。
  *
  * <p>原图（Mermaid）里除了 {@code D -. 并行通知 .-> T} 那条并行边之外，全部节点与边都在这里 ——
- * 并行扇出引擎目前不支持（每次只走一条出边），那条支线的三个节点 T/U/V 因此被略去，
- * 这正是"忽略并行路径"的字面含义。</p>
+ * 并行扇出引擎目前不支持（每次只走一条出边），那条支线的三个节点 T/U/V 因此被略去。</p>
  *
- * <p>这张图刻意覆盖了代码编排里最容易写歪的几种结构：</p>
- * <ul>
- *   <li><b>三出口判定</b>：风控审核结论、高级复核结论各三个走向；</li>
- *   <li><b>数据判定分支</b>：基础校验、风控命中、金额阈值、是否补充、是否重提；</li>
- *   <li><b>两条回边</b>：补充材料 / 退回修改后都回到"进入审核队列"重跑；</li>
- *   <li><b>四个终点</b>：校验失败、驳回、审核通过、超时关闭；</li>
- *   <li><b>模型在环</b>：两个审核结论节点是真的 agent 节点，靠系统提示词把输出约束成枚举值。</li>
- * </ul>
+ * <p><b>可读性靠两件事，而不是靠注释堆</b>：</p>
+ * <ol>
+ *   <li><b>分段</b>：整张图不是一条 70 行的链，而是 {@link #intake}、{@link #riskControl}、
+ *       {@link #rework}、{@link #approval}、{@link #timeout} 五个方法，
+ *       方法名就是这段图在做什么；{@link #orderApproval()} 本身只有六行。</li>
+ *   <li><b>可反查</b>：{@link Mermaid#toMermaid} 能把代码里的图导回 Mermaid，
+ *       与设计稿逐行比对 —— 见 {@link #exportsMermaidGraph()}。</li>
+ * </ol>
  *
- * <p>订单数据从输入 JSON 进来，由 {@code B} 解析成后续判定要用的变量；两个审核结论由模型给出。
- * 各场景的模型输出用 {@link ScriptedModel} 脚本化，因此整条路径是确定的、可断言的。</p>
+ * <p>两个审核结论（F、M）用 {@code choice} 声明<b>输出契约</b>：模型只能吐"通过/驳回/需补充材料"，
+ * 归一化判不出来就让节点失败。因此下游 {@code caseOf} 的精确匹配是有保障的，
+ * 而不是"希望模型照做"。</p>
  */
 class OrderApprovalFlowTest {
 
@@ -44,84 +45,94 @@ class OrderApprovalFlowTest {
     private static final int AMOUNT_THRESHOLD = 5_000;
 
     // ------------------------------------------------------------------
-    // 图
+    // 图：先分段，再拼起来
     // ------------------------------------------------------------------
 
     static WorkflowDefinition orderApproval() {
-        return JavaFlow.builder("order-approval")
-                .description("订单审核：基础校验 → 风控 → 审核结论 → 金额分级 → 高级复核 → 履约/驳回/超时")
+        JavaFlow flow = JavaFlow.builder("order-approval")
+                .description("订单审核：基础校验 → 风控 → 审核结论 → 金额分级 → 高级复核 → 履约/驳回/超时");
 
-                // A 开始 → B 系统接收订单（解析订单 JSON，产出判定要用的变量）
-                .start("A", "订单数据：${input}")
-                .code("B", OrderApprovalFlowTest::receiveOrder)
+        flow = intake(flow);
+        flow = riskControl(flow);
+        flow = rework(flow);
+        flow = approval(flow);
+        return timeout(flow).build();
+    }
+
+    /** A 开始 → B 收单 → C 基础校验；不通过就记录原因并关闭。 */
+    private static JavaFlow intake(JavaFlow flow) {
+        return flow.start("A", "订单数据：${input}")
+                .code("B", OrderApprovalFlowTest::receiveOrder).describe("B", "系统接收订单")
                 .chain("A", "B")
-
-                // C 基础校验是否通过？否 → 记录原因并关闭
                 .branchOn("C", "valid", c -> c.caseOf("true", "D").otherwise("C1"))
                 .chain("B", "C")
-                .code("C1", in -> NodeOutput.of("记录校验失败原因"))
+                .code("C1", in -> NodeOutput.of("记录校验失败原因")).describe("C1", "记录校验失败原因")
                 .end("C2", "【校验失败关闭】${C1}")
-                .chain("C1", "C2")
+                .chain("C1", "C2");
+    }
 
-                // D 进入审核队列 → E 是否命中风控规则？
-                .code("D", in -> NodeOutput.of("进入审核队列", JavaFlow.args("status", "审核中")))
+    /** D 进审核队列 → E 风控命中判定 → F 风控结论（三出口）；驳回则发通知并结束。 */
+    private static JavaFlow riskControl(JavaFlow flow) {
+        return flow.code("D", in -> NodeOutput.of("进入审核队列", JavaFlow.args("status", "审核中")))
+                .describe("D", "进入审核队列")
                 .branchOn("E", "riskHit", c -> c.caseOf("true", "E1").otherwise("E2"))
                 .chain("D", "E")
-                .code("E1", in -> NodeOutput.of("转人工风控审核"))
-                .code("E2", in -> NodeOutput.of("进入自动审核"))
+                .code("E1", in -> NodeOutput.of("转人工风控审核")).describe("E1", "转人工风控审核")
+                .code("E2", in -> NodeOutput.of("进入自动审核")).describe("E2", "进入自动审核")
                 .chain("E1", "F")
                 .chain("E2", "F")
-
-                // F 风控审核结论（模型给出，三出口：通过 / 驳回 / 需补充材料）
-                .agent("F", "只输出以下三个词之一：通过 / 驳回 / 需补充材料", "请给出风控审核结论：\n${last}")
+                // 输出契约：模型只能说这三个词之一，判不出来就纠正重问，重试用尽则节点失败
+                .agent("F", "你是风控审核员", "请给出风控审核结论：\n${last}",
+                        "通过", "驳回", "需补充材料")
+                .describe("F", "风控审核结论")
                 .routeFrom("F", "F", c -> c
                         .caseOf("通过", "G")
                         .caseOf("驳回", "H")
                         .caseOf("需补充材料", "I"))
-
-                // G 金额是否超过阈值？否 → 自动通过；是 → 转高级审核员复核
-                .branchOn("G", "overThreshold", c -> c.caseOf("true", "L").otherwise("K"))
-
-                // H 驳回 → 结束
-                .code("H", in -> NodeOutput.of("生成驳回通知"))
+                .code("H", in -> NodeOutput.of("生成驳回通知")).describe("H", "生成驳回通知")
                 .end("H1", "【驳回结束】${H}")
-                .chain("H", "H1")
+                .chain("H", "H1");
+    }
 
-                // I 通知补充材料 → I1 是否在规定时间内补充？是 → 回到审核队列
-                .code("I", in -> NodeOutput.of("通知商家补充材料"))
+    /** 两条回流：补充材料超时、退回修改未重提，都落到 J（超时）；补齐/重提则回到 D 重跑。 */
+    private static JavaFlow rework(JavaFlow flow) {
+        return flow.code("I", in -> NodeOutput.of("通知商家补充材料")).describe("I", "通知商家补充材料")
                 .chain("I", "I1")
                 .branchOn("I1", "supplemented", c -> c.caseOf("true", "D").otherwise("J"))
+                .code("N", in -> NodeOutput.of("退回商家修改订单")).describe("N", "退回商家修改订单")
+                .chain("N", "N1")
+                .branchOn("N1", "resubmitted", c -> c.caseOf("true", "D").otherwise("J"));
+    }
 
-                // L 高级复核 → M 复核结论（模型给出，三出口：通过 / 驳回 / 退回修改）
-                .code("L", in -> NodeOutput.of("转高级审核员复核"))
+    /** G 金额分级 →（超阈值）L 高级复核 → M 复核结论（三出口）→ K 通过 → 履约。 */
+    private static JavaFlow approval(JavaFlow flow) {
+        return flow.branchOn("G", "overThreshold", c -> c.caseOf("true", "L").otherwise("K"))
+                .code("L", in -> NodeOutput.of("转高级审核员复核")).describe("L", "转高级审核员复核")
                 .chain("L", "M")
-                .agent("M", "只输出以下三个词之一：通过 / 驳回 / 退回修改", "请给出高级复核结论：\n${last}")
+                .agent("M", "你是高级审核员", "请给出高级复核结论：\n${last}",
+                        "通过", "驳回", "退回修改")
+                .describe("M", "高级复核结论")
                 .routeFrom("M", "M", c -> c
                         .caseOf("通过", "K")
                         .caseOf("驳回", "H")
                         .caseOf("退回修改", "N"))
-
-                // N 退回商家修改 → N1 是否重新提交？是 → 回到审核队列
-                .code("N", in -> NodeOutput.of("退回商家修改订单"))
-                .chain("N", "N1")
-                .branchOn("N1", "resubmitted", c -> c.caseOf("true", "D").otherwise("J"))
-
-                // K 审核通过 → O 通知 → P 履约 → Q 结束
                 .code("K", in -> NodeOutput.of("自动审核通过", JavaFlow.args("status", "已通过")))
+                .describe("K", "自动审核通过")
                 .chain("K", "O")
-                .code("O", in -> NodeOutput.of("生成审核通过通知"))
+                .code("O", in -> NodeOutput.of("生成审核通过通知")).describe("O", "生成审核通过通知")
                 .chain("O", "P")
-                .code("P", in -> NodeOutput.of("进入履约/发货流程"))
+                .code("P", in -> NodeOutput.of("进入履约/发货流程")).describe("P", "进入履约/发货流程")
                 .end("Q", "【审核通过】${O}｜${P}")
-                .chain("P", "Q")
+                .chain("P", "Q");
+    }
 
-                // J 超时 → R 通知 → S 结束
-                .code("J", in -> NodeOutput.of("触发超时计时器"))
-                .code("R", in -> NodeOutput.of("发送超时关闭通知"))
+    /** J 超时计时 → R 通知 → S 结束。 */
+    private static JavaFlow timeout(JavaFlow flow) {
+        return flow.code("J", in -> NodeOutput.of("触发超时计时器")).describe("J", "触发超时计时器")
+                .code("R", in -> NodeOutput.of("发送超时关闭通知")).describe("R", "发送超时关闭通知")
                 .end("S", "【超时关闭】${R}")
                 .chain("J", "R")
-                .chain("R", "S")
-                .build();
+                .chain("R", "S");
     }
 
     /**
@@ -223,7 +234,7 @@ class OrderApprovalFlowTest {
     @DisplayName("⑤ 商家修改后重新提交：回到审核队列重跑，第二次通过")
     void loopsBackAfterResubmission() {
         ScriptedModel model = ScriptedModel.of(
-                ScriptedModel.text("通过"),        // F → G（金额未超阈值）
+                ScriptedModel.text("通过"),        // F
                 ScriptedModel.text("退回修改"),   // M
                 ScriptedModel.text("通过"),        // 回边后的 F
                 ScriptedModel.text("通过"));       // 回边后的 M
@@ -237,21 +248,59 @@ class OrderApprovalFlowTest {
         assertThat(result.text()).contains("审核通过");
     }
 
+    @Test
+    @DisplayName("⑥ 模型不听话也不会走错路：输出带 Markdown 与客气话，仍被归一化成『通过』")
+    void contractAbsorbsUnrulyModelOutput() {
+        ScriptedModel model = ScriptedModel.of(
+                ScriptedModel.text("好的，我的**结论：通过**。"));
+
+        AgentResult result = agent(model)
+                .call("{\"valid\":true,\"riskHit\":false,\"amount\":100}");
+
+        // 归一化后进 G → 金额未超阈值 → K → 履约（而不是因为"多说了两句"掉进默认分支）
+        assertThat(visited(result)).containsExactly(
+                "A", "B", "C", "D", "E", "E2", "F", "G", "K", "O", "P", "Q");
+        assertThat(result.text()).contains("审核通过");
+    }
+
     // ------------------------------------------------------------------
-    // 结构
+    // 结构：代码与图互相校验
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("图结构与原图一致：26 个节点、四个终点，并行支线 T/U/V 被略去")
+    @DisplayName("图结构与原图一致：26 个节点、31 条边、四个终点，并行支线 T/U/V 被略去")
     void keepsTheWholeGraph() {
         WorkflowDefinition flow = orderApproval();
 
-        // 节点集合与边数与原图一致（插入顺序按 DSL 书写，不是图的语义，故不约束）
         assertThat(flow.nodeIds()).containsExactlyInAnyOrder(
                 "A", "B", "C", "C1", "C2", "D", "E", "E1", "E2", "F", "G", "H", "H1",
                 "I", "I1", "J", "K", "L", "M", "N", "N1", "O", "P", "Q", "R", "S");
         // 原图里 D -. 并行通知 .-> T 这条支线不支持，也不该被悄悄造出来
         assertThat(flow.nodeIds()).doesNotContain("T", "U", "V");
         assertThat(flow.edges()).hasSize(31);
+    }
+
+    @Test
+    @DisplayName("导出的 Mermaid 与设计稿同构：形状、分支标签、两条回边、四个终点都在")
+    void exportsMermaidGraph() {
+        String mermaid = Mermaid.toMermaid(orderApproval());
+
+        assertThat(mermaid).startsWith("flowchart TD");
+        // 开始/结束是胶囊、判断是菱形、动作是矩形
+        assertThat(mermaid).contains("A([\"订单数据：${input}\"])");
+        assertThat(mermaid).contains("C{\"判断：valid\"}");
+        assertThat(mermaid).contains("C1[\"记录校验失败原因\"]");
+        // 三出口的标签来自 caseOf，不需要人工再标注
+        assertThat(mermaid).contains("F -->|\"通过\"| G")
+                .contains("F -->|\"驳回\"| H")
+                .contains("F -->|\"需补充材料\"| I");
+        // 两条回边
+        assertThat(mermaid).contains("I1 -->|\"true\"| D")
+                .contains("N1 -->|\"true\"| D");
+        // 四个终点
+        assertThat(mermaid).contains("C2([\"【校验失败关闭】")
+                .contains("H1([\"【驳回结束】")
+                .contains("Q([\"【审核通过】")
+                .contains("S([\"【超时关闭】");
     }
 }

@@ -154,6 +154,77 @@ class CodeFlowLoopTest {
     // 多出口 + 回边
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // 输出契约
+    // ------------------------------------------------------------------
+
+    private static WorkflowDefinition verdictFlow() {
+        return JavaFlow.builder("verdict")
+                .start("begin", "${input}")
+                .agent("F", "你是审核员", "请给出结论", "通过", "驳回")
+                .routeFrom("F", "F", c -> c
+                        .caseOf("通过", "pass")
+                        .caseOf("驳回", "reject"))
+                .end("pass", "PASS[${F}]")
+                .end("reject", "REJECT[${F}]")
+                .chain("begin", "F")
+                .build();
+    }
+
+    @Test
+    @DisplayName("输出契约：模型套了 Markdown、加了客气话，仍然进对分支；黑板上留下的是干净枚举值")
+    void contractNormalizesIntoEnumOnBlackboard() {
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("好的，**结论：通过**。"));
+
+        AgentResult result = agent(CodeFlowLoop.of(verdictFlow()), model, 8).call("材料");
+
+        // 注意 ${F} 取到的是"通过"两个干净的汉字，而不是模型原文
+        assertThat(result.text()).isEqualTo("PASS[通过]");
+    }
+
+    @Test
+    @DisplayName("输出契约：第一次含糊不清就纠正重问，第二次合规即放行")
+    void contractRetriesWhenModelWanders() {
+        ScriptedModel model = ScriptedModel.of(
+                ScriptedModel.text("我看了一下，感觉还行"),
+                ScriptedModel.text("通过"));
+
+        AgentResult result = agent(CodeFlowLoop.of(verdictFlow()), model, 8).call("材料");
+
+        assertThat(result.text()).isEqualTo("PASS[通过]");
+        assertThat(model.callCount()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("输出契约：反复不合规就让节点失败，绝不把模糊答案当成枚举值塞进图里")
+    void contractFailsWhenModelKeepsWandering() {
+        ScriptedModel model = ScriptedModel.of(
+                ScriptedModel.text("不确定"),
+                ScriptedModel.text("还是不确定"),
+                ScriptedModel.text("真的不确定"));
+
+        assertThatThrownBy(() -> agent(CodeFlowLoop.of(verdictFlow()), model, 16).call("材料"))
+                .isInstanceOf(WorkflowException.class)
+                .hasMessageContaining("不在契约")
+                .hasMessageContaining("不确定");
+        // 首次 + 两次纠正重试，之后不再无限重问
+        assertThat(model.callCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("输出契约只写在 agent 节点上，别的节点带 choice 会在构建期报错")
+    void choiceOnlyBelongsToAgentNodes() {
+        assertThatThrownBy(() -> WorkflowDefinition.builder("bad")
+                .node(com.benxin.llm.core.workflow.WorkflowNode.builder("a")
+                        .type(com.benxin.llm.core.workflow.NodeType.CODE)
+                        .behavior(in -> NodeOutput.of("x"))
+                        .choice(java.util.List.of("通过"))
+                        .build())
+                .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("只有 agent 节点支持 choice");
+    }
+
     @Test
     @DisplayName("三出口分支 + 回到入口节点重跑 + 多个终点：图里最复杂的那类结构确实可表达")
     void reworkLoopsBackToEntryAndCanEndInSeveralPlaces() {

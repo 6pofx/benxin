@@ -107,6 +107,23 @@ public final class JavaFlow {
                 .system(system).prompt(prompt));
     }
 
+    /**
+     * 带<b>输出契约</b>的 agent 节点：模型这一步必须只吐出 {@code choices} 里的一个值。
+     *
+     * <p>这是代码级校验，不是提示词请求 —— 运行时会把输出归一化（去 Markdown 围栏/加粗/
+     * 引号/尾标点/"结论："前缀），判不出唯一值时追加一条纠正消息让模型重答，
+     * 重试用尽仍不合规就让节点失败。因此下游 {@code caseOf} 才能安全地做精确匹配。</p>
+     *
+     * <pre>{@code
+     * .agent("F", "你是风控审核员", "请给出审核结论：\n${last}", "通过", "驳回", "需补充材料")
+     * .routeFrom("F", "F", c -> c.caseOf("通过", "G").caseOf("驳回", "H").caseOf("需补充材料", "I"))
+     * }</pre>
+     */
+    public JavaFlow agent(String id, String system, String prompt, String... choices) {
+        return add(WorkflowNode.builder(id).type(NodeType.AGENT)
+                .system(system).prompt(prompt).choice(List.of(choices)));
+    }
+
     /** 直接调一个已注册的工具，不经过模型。 */
     public JavaFlow tool(String id, String tool) {
         return add(WorkflowNode.builder(id).type(NodeType.TOOL).tool(tool));
@@ -162,7 +179,53 @@ public final class JavaFlow {
      */
     public JavaFlow branchOn(String id, String valueName, Consumer<Cases> cases) {
         branch(id);
+        // 给分支节点一个能读的说明：导出 Mermaid 时它就是菱形里的文字
+        if (valueName != null && !valueName.isBlank()) {
+            describe(id, "判断：" + valueName);
+        }
         return routeFrom(id, valueName, cases);
+    }
+
+    /**
+     * 给已添加的节点补一句<b>说明</b>。
+     *
+     * <p>说明不参与任何运行时语义，只影响两处：导出 Mermaid 时节点里的文字，
+     * 以及看代码时"这一步在干嘛"。所以它可以在图写完之后统一补上，
+     * 不必挤在每条 {@code .code(...)} 里。</p>
+     */
+    public JavaFlow describe(String nodeId, String description) {
+        if (nodeId == null || description == null || description.isBlank()) {
+            return this;
+        }
+        for (int i = 0; i < nodes.size(); i++) {
+            WorkflowNode node = nodes.get(i);
+            if (nodeId.equals(node.id())) {
+                nodes.set(i, copy(node, description));
+                return this;
+            }
+        }
+        throw new IllegalArgumentException("describe 找不到节点 [" + nodeId + "]");
+    }
+
+    /** 复制节点并替换说明（节点是不可变值对象，所以只能换一个实例）。 */
+    private static WorkflowNode copy(WorkflowNode node, String description) {
+        return WorkflowNode.builder(node.id())
+                .type(node.type())
+                .description(description)
+                .prompt(node.prompt())
+                .system(node.system())
+                .instruction(node.instruction())
+                .tool(node.tool())
+                .handler(node.handler())
+                .behavior(node.behavior())
+                .args(node.args())
+                .set(node.set())
+                .output(node.output())
+                .retry(node.retry())
+                .continueOnError(node.continueOnError())
+                .maxSteps(node.maxSteps())
+                .choice(node.choice())
+                .build();
     }
 
     /**
@@ -218,7 +281,8 @@ public final class JavaFlow {
          */
         public Cases caseOf(String expected, String target) {
             String key = requireText(expected, "caseOf 的匹配值");
-            edge(from, target, v -> v.text(valueName).trim().equals(key));
+            edge(WorkflowEdge.builder(from, target).label(key)
+                    .condition(v -> v.text(valueName).trim().equals(key)).build());
             return this;
         }
 
@@ -231,7 +295,8 @@ public final class JavaFlow {
          */
         public Cases whenContains(String expected, String target) {
             String key = requireText(expected, "whenContains 的匹配值");
-            edge(from, target, v -> v.text(valueName).contains(key));
+            edge(WorkflowEdge.builder(from, target).label("包含：" + key)
+                    .condition(v -> v.text(valueName).contains(key)).build());
             return this;
         }
 
