@@ -188,8 +188,13 @@ public final class WorkflowIo {
      * {@code name()} / {@code nodes()} 这种无 {@code get} 前缀的访问器，
      * 而且我们<b>希望默认值不出现在输出里</b>（{@code retry: 0}、{@code maxSteps: -1}
      * 写进去只会让示例变吵）。手写一层换来的是干净、稳定、可读的往返格式。</p>
+     *
+     * @throws IllegalArgumentException 定义里有 Java 对象（代码节点或谓词边）时 ——
+     *                                  这类定义按定义就不可序列化，宁可报错也不要写出
+     *                                  一份读回来会变形的东西
      */
     public static Map<String, Object> toMap(WorkflowDefinition definition) {
+        assertSerializable(definition);
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("name", definition.name());
         putIfPresent(root, "description", definition.description());
@@ -244,6 +249,31 @@ public final class WorkflowIo {
     private static void putIfPresent(Map<String, Object> target, String key, String value) {
         if (value != null && !value.isBlank()) {
             target.put(key, value);
+        }
+    }
+
+    /**
+     * 拒绝序列化"含 Java 对象"的定义。
+     *
+     * <p>代码编排的本质就是"图里挂着活对象"，它<b>按定义</b>不可序列化。
+     * 真正危险的失败方式不是报错，而是<b>静默丢语义</b>：
+     * 一条谓词边如果没有 {@code when}，照样会被写成无条件边 ——
+     * 读回来图就变形了，而且没有任何提示。所以必须在出口处拦下。</p>
+     */
+    private static void assertSerializable(WorkflowDefinition definition) {
+        for (WorkflowNode node : definition.nodes()) {
+            if (node.behavior() != null) {
+                throw new IllegalArgumentException("工作流 [" + definition.name() + "] 的节点 [" + node.id()
+                        + "] 绑定了 Java 行为对象（代码编排），无法序列化为 YAML/JSON。"
+                        + "代码编排请直接在 Java 里运行，不要写回配置文件。");
+            }
+        }
+        for (WorkflowEdge edge : definition.edges()) {
+            if (edge.condition() != null) {
+                throw new IllegalArgumentException("工作流 [" + definition.name() + "] 的边 [" + edge.from()
+                        + " -> " + edge.to() + "] 的条件是 Java 谓词，无法序列化为 YAML/JSON —— "
+                        + "若强行写出会变成一条无条件边，读回来图就变形了。");
+            }
         }
     }
 }

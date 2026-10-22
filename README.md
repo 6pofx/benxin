@@ -46,7 +46,7 @@ public interface WeatherAssistant {
 | 模型 | `LlmModel` | `HttpLlmModel`（由协议 Codec 装配；`OpenAiModel` / `AnthropicModel` / `GeminiModel` 保留为便捷预设类） | 定义 `LlmModel` bean，或写 `llm.models.*` |
 | 协议 | `ProtocolCodec` | `OpenAiCodec` / `AnthropicCodec` / `GeminiCodec` / `ResponsesApiCodec` | 注册 `ProtocolCodec` bean，配置里写 `protocol: <你的名字>`。见[加自己的协议](#加自己的协议) |
 | 传输 | `HttpTransport` | `JdkHttpTransport`（零依赖） | 定义 `HttpTransport` bean（OkHttp / WebClient / 测试桩） |
-| **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `staged` | `@LlmLoop("名字")` |
+| **循环** | `AgentLoop` | `dsh-minimal` `react` `claude-code` `codex` `plan-execute` `reflexion` `workflow` `flow` `staged` | `@LlmLoop("名字")` |
 | **工具** | `ToolCallback` | 反射适配器 + 8 个内置工具 | `@LlmTool` 注解方法 |
 | 上下文 | `ContextManager` | `DefaultContextManager` | 定义 bean |
 | 压缩 | `ContextCompactor` | `SummarizingCompactor` / `SlidingWindowCompactor` | 定义 bean |
@@ -425,6 +425,7 @@ starter 会把容器里所有 `ProtocolCodec` bean 收进 `ProtocolRegistry`、`
 | `plan-execute` | 经典范式 | 第一步强制产出编号计划，之后逐步推进并回显进度 |
 | `reflexion` | 经典范式 | 执行 → 自省评分 → 低于阈值则带着批评重做 |
 | `workflow` | 声明式编排 | **下一步由图决定，而不是模型**：节点与边写在 YAML/JSON 里，分支条件是表达式。可审计、可复现、成本可控 |
+| `flow` | 代码编排 | 拓扑写在 Java 里（`JavaFlow`），节点行为是直接绑定的对象，边条件是 `Predicate`。类型安全、可注入依赖，代价是图不可序列化 |
 | `staged` | 结构化编排 | 规划 → 执行 → **校验** → 修复 → 汇总；汇总前强制验收，不通过则带问题回到修复阶段 |
 
 ### 选一个
@@ -471,7 +472,8 @@ public class MyLoop extends AbstractAgentLoop {
 ## 工作流模式
 
 其它 Loop 里，"下一步做什么"由模型当场决定。工作流模式把这件事反过来：
-**模型只负责填内容，控制流由我们决定**。本心给了两条路线，按"流程定不定得下来"选。
+**模型只负责填内容，控制流由我们决定**。本心给了三条路线 —— 前两条是"图怎么描述"之争
+（写在配置里 vs 写在代码里），第三条是"流程能不能提前画出来"之争（画不出来就别用图）。
 
 ### 一、声明式：`workflow` —— 图写在 YAML 里
 
@@ -646,7 +648,56 @@ public class TextStatsHandler implements WorkflowHandler {
 否则一份工作流定义就成了任意代码执行入口。所以定义引用不存在的处理器时，
 Spring 侧会在**启动期**失败并列出已注册清单，而不是等任务跑到一半才炸。
 
-### 二、结构化编排：`staged` —— 流程固化在代码里
+### 二、代码编排：`flow` —— 图写在 Java 里
+
+前一种得先有一份配置；这一种直接把拓扑写成 Java 代码：
+
+```java
+WorkflowDefinition flow = JavaFlow.builder("review")
+        .start("begin", "请评审：${input}")
+        .agent("analyze", "分析：${begin}")
+        .code("lint", new LintNode(threshold))            // 任意对象，可 Spring 注入
+        .branch("route")
+        .edge("begin",   "analyze")
+        .edge("analyze", "route")
+        .edge("route",   "fix", v -> v.text("analyze").contains("严重"))   // 谓词，不是字符串
+        .edge("route",   "report")                        // 默认边写在最后
+        .end("report", "结论：${analyze}\n检查：${lint}")
+        .build();
+```
+
+```java
+@LlmAgent(model = "deepseek", loop = "flow")              // 需要把图注册成 bean
+public interface Reviewer { String review(String code); }
+
+// 或者程序化装配，不经过注解：
+Agent agent = Agent.builder("reviewer")
+        .model("deepseek")
+        .loop(CodeFlowLoop.of(flow))
+        .build();
+```
+
+**三个收益**（YAML 模式给不了的）：
+
+- **类型安全**：边条件是 `Predicate<FlowView>`，写错编译不过；`${...}` 里的笔误编译期发现不了，谓词可以。
+- **可注入依赖**：节点是对象，`new LintNode(threshold)` 或 Spring bean 都行，能带状态、能被单测直接实例化。
+- **重构友好**：改类名、抽方法，IDE 全程跟得上。
+
+**一个代价**：图里挂着活对象，所以这类定义**不可序列化**。`WorkflowIo.writeJson` 会明确拒绝，
+而不是写出一份读回来就变形的文件 —— 一条谓词边若被写成无条件边，图的语义就被静默改掉了。
+
+> 一个小坑：代码节点写回的变量名不要与自己的节点 id 相同 —— 节点 id 那个键永远代表它自己的输出，
+> 同名变量会被覆盖（这条规则与 YAML 模式完全一致）。
+
+**单向不混用**：YAML 里不能引用代码节点（`type: code` 在加载期直接报错）；
+`flow` 也不认 `benxin.workflow` 属性里的 YAML —— 它只接受构造时绑定的图。
+想用配置描述图，请用上面的 `workflow`。
+
+**同一个引擎**：`JavaFlow` 产出的就是 `WorkflowDefinition`，因此边序即优先级、
+`maxVisitsPerNode` 护栏、`retry` / `continueOnError`、预算中断、事件与变量回写，
+与 YAML 模式完全一致 —— 换写法不用重学一套语义。
+
+### 三、结构化编排：`staged` —— 流程固化在代码里
 
 ```
 PLAN ──► EXECUTE ──► VERIFY ──通过──► SYNTHESIZE ──► 结束
@@ -1003,8 +1054,8 @@ benxin/
 │       ├── model/                LlmModel / ModelRegistry / ModelFactory
 │       ├── tool/ sandbox/        工具抽象、反射适配、JSON Schema、沙箱、审批
 │       ├── tool/builtin/         8 个内置工具
-│       ├── loop/                 AgentLoop、AbstractAgentLoop、8 个内置 Loop（含 workflow / staged）
-│       ├── workflow/             声明式工作流：图模型、引擎、条件表达式、YAML/JSON 读写、Java 节点
+│       ├── loop/                 AgentLoop、AbstractAgentLoop、9 个内置 Loop（含 workflow / flow / staged）
+│       ├── workflow/             工作流与代码编排：图模型、引擎、条件表达式、YAML/JSON 读写、Java 节点、JavaFlow DSL
 │       ├── agent/                Agent 运行时与装配器
 │       ├── context/ memory/ prompt/ hook/   上下文、记忆、提示词、拦截器、监听器
 │
@@ -1040,8 +1091,8 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 > 示例工程依赖 `benxin` 的两个产物。若本地还没有发布版，先在**本仓库**执行
 > `mvn -o install -DskipTests` 把它装进本地 Maven 仓库。
 
-它把本 README 提到的能力几乎都演示了一遍：注解全属性、8 个内置 Agent Loop（含 `workflow` /
-`staged` 两条编排路线，以及工作流的 `java` 节点）、四种协议的**线级报文**、沙箱与四种审批、
+它把本 README 提到的能力几乎都演示了一遍：注解全属性、9 个内置 Agent Loop（含 `workflow` /
+`flow` / `staged` 三条编排路线，以及工作流的 `java` 节点）、四种协议的**线级报文**、沙箱与四种审批、
 上下文压缩与分词估算、监听器与拦截器全回调、逐个切面的 bean 覆盖、MySQL 持久化、
 真实 DeepSeek 联调，以及本机小模型（LM Studio + Qwen3-VL）的**视觉**演示。
 
@@ -1060,7 +1111,7 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 ```bash
 git clone https://github.com/6pofx/benxin.git
 cd benxin
-mvn -o test                          # 260 个离线用例，不联网、不花钱
+mvn -o test                          # 281 个离线用例，不联网、不花钱
 ```
 
 ---
@@ -1097,10 +1148,11 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 
 当前版本 **1.1.1**（上一个发布版本是 `v1.1.0`）。
 
-### 未发布（`feature/workflow-java-node` 分支）
+### 未发布（`feature/java-flow` 分支）
 
 | 项 | 说明 |
 |---|---|
+| **代码编排：`flow`** | 第三种编排路线 —— 拓扑用 `JavaFlow` 写在 Java 里，节点行为是直接绑定的对象（`type: code`），边条件是 `Predicate<FlowView>`。与 YAML 模式**共用同一个引擎**（边序优先级、访问上限、重试、预算、事件语义完全一致），但定义**不可序列化**：`WorkflowIo` 会明确拒绝写出含 Java 对象的图，而不是静默丢条件。**单向不混用**：YAML 里不能引用代码节点，`flow` 也不认 `benxin.workflow` 属性里的 YAML（见[工作流模式](#工作流模式)） |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
 | **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
@@ -1203,7 +1255,7 @@ cd benxin
 mvn -o test
 ```
 
-**260 个测试全部通过**（benxin-core 216 / starter 44，共 21 个测试类），
+**281 个测试全部通过**（benxin-core 237 / starter 44，共 23 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1247,6 +1299,8 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `WorkflowLoopTest` | 11 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes、`java` 节点端到端 |
 | `WorkflowHandlerRegistryTest` | 8 | `@LlmNode` 上的名字即唯一契约、缺注解报错、缺处理器时列出可用清单、同名后设者胜 |
 | `WorkflowJavaNodeTest` | 10 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、变量保型、重试与补偿、可作循环体 |
+| `JavaFlowTest` | 16 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝 |
+| `CodeFlowLoopTest` | 5 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册 |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
 | `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |

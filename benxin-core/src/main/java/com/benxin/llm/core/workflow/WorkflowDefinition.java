@@ -188,10 +188,10 @@ public final class WorkflowDefinition {
             }
         }
         for (WorkflowEdge edge : edges) {
+            // 边自己的校验（含条件表达式语法、以及"表达式与谓词不能同时给"）
             edge.validate("工作流 [" + name + "]");
             require(edge.from());
             require(edge.to());
-            Conditions.validate(edge.when());
         }
         if (entry != null) {
             require(entry);

@@ -131,7 +131,7 @@ public final class WorkflowEngine {
                         "reason", "没有出边"));
                 break;
             }
-            WorkflowEdge chosen = select(edges, state);
+            WorkflowEdge chosen = select(definition, node, edges, state, runtime);
             if (chosen == null) {
                 finalOutput = state.last();
                 runtime.emit("workflow.dead-end", event("workflow", definition.name(), "node", node.id(),
@@ -164,10 +164,25 @@ public final class WorkflowEngine {
      *
      * <p>顺序即优先级 —— 这个决定让"默认分支放最后"成为唯一需要记住的规则，
      * 比引入 {@code priority} 数字更好维护。</p>
+     *
+     * <p>条件可能是用户写的 lambda：它在求值时抛异常必须能定位到"哪条边"，
+     * 否则会变成一条指向未知位置的 NPE。</p>
      */
-    private WorkflowEdge select(List<WorkflowEdge> edges, WorkflowState state) {
+    private WorkflowEdge select(WorkflowDefinition definition, WorkflowNode node,
+                                List<WorkflowEdge> edges, WorkflowState state,
+                                WorkflowRuntime runtime) {
         for (WorkflowEdge edge : edges) {
-            if (Conditions.evaluate(edge.when(), state.lookup())) {
+            boolean matched;
+            try {
+                matched = edge.matches(state);
+            } catch (RuntimeException e) {
+                runtime.emit("workflow.edge-error", event("workflow", definition.name(),
+                        "node", node.id(), "edge", edge.toString(),
+                        "error", String.valueOf(e.getMessage())));
+                throw new WorkflowException(definition.name(), node.id(),
+                        "节点 [" + node.id() + "] 的出边 " + edge + " 条件求值失败：" + e, e);
+            }
+            if (matched) {
                 return edge;
             }
         }
@@ -263,19 +278,8 @@ public final class WorkflowEngine {
                 Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
                 yield Outcome.of(runtime.callTool(node.tool(), args, node));
             }
-            case JAVA -> {
-                Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
-                NodeInput input = new NodeInput(node.id(), args, state.variables(),
-                        state.input(), state.last(), state.error());
-                NodeOutput result = runtime.callHandler(node.handler(), input, node);
-                if (result == null) {
-                    // 接口约定不得返回 null；这里兜成"无输出"，比让引擎在下一行 NPE 清楚得多
-                    yield Outcome.silent();
-                }
-                yield result.producesOutput()
-                        ? Outcome.of(result.output(), result.variables())
-                        : Outcome.silent(result.variables());
-            }
+            case JAVA -> toOutcome(runtime.callHandler(node.handler(), nodeInput(node, state), node));
+            case CODE -> toOutcome(node.behavior().handle(nodeInput(node, state)));
             case SET -> {
                 node.set().forEach((key, template) -> state.put(key, state.render(template)));
                 yield Outcome.silent();
@@ -288,6 +292,29 @@ public final class WorkflowEngine {
                 yield Outcome.of(text);
             }
         };
+    }
+
+    /**
+     * 构造交给节点行为的输入：参数已渲染，黑板是只读快照。
+     *
+     * <p>{@code java} 节点与 {@code code} 节点共用这一份，因此两种写法的节点
+     * 看到的输入完全一致 —— 迁移时只需要换个绑定方式。</p>
+     */
+    private NodeInput nodeInput(WorkflowNode node, WorkflowState state) {
+        Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
+        return new NodeInput(node.id(), args, state.variables(),
+                state.input(), state.last(), state.error());
+    }
+
+    /** 把行为返回的 {@link NodeOutput} 转成引擎内部的 {@link Outcome}。 */
+    private static Outcome toOutcome(NodeOutput result) {
+        if (result == null) {
+            // 接口约定不得返回 null；这里兜成"无输出"，比让引擎在下一行 NPE 清楚得多
+            return Outcome.silent();
+        }
+        return result.producesOutput()
+                ? Outcome.of(result.output(), result.variables())
+                : Outcome.silent(result.variables());
     }
 
     /** 把 {@code instruction} 与 {@code prompt} 渲染并拼成最终提示词。 */

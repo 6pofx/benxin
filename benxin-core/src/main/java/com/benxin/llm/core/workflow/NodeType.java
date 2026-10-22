@@ -16,6 +16,11 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * 而不是继续往这张枚举里加第七种、第八种节点。它有三个刻意的边界：
  * 不能调模型、不能调工具、不能直接指定下一条边 —— 详见 {@link WorkflowHandler}。</p>
  *
+ * <p>{@link #CODE} 不是"第八种节点"，而是<b>同一个逃生口的代码编排版本</b>：
+ * 行为不再按名字去注册表里查，而是直接是一个绑在节点上的对象。它只能在
+ * {@link JavaFlow} 里出现（Java 对象写不进 YAML），因此不列出在下面
+ * {@link #from} 的"可选值"提示里。</p>
+ *
  * <p>循环不需要专门的节点类型：把边指回上游节点即可，由
  * {@link WorkflowEngine} 的步数预算与单节点访问上限兜底。</p>
  */
@@ -36,6 +41,15 @@ public enum NodeType {
      * <p>面向图而不是模型：不进工具 Schema、不经沙箱与审批，结果可以带回变量。</p>
      */
     JAVA("java"),
+
+    /**
+     * 代码编排节点：行为是一个直接绑在节点上的 Java 对象（{@link WorkflowNode#behavior()}）。
+     *
+     * <p>它只在<b>代码编排</b>（{@link JavaFlow}）里出现 —— 因为 Java 对象写不进 YAML。
+     * 一旦在配置里写 {@code type: code}，加载期就会报"必须绑定 WorkflowHandler"，
+     * 这比让人误以为 YAML 也能定义代码节点要好。</p>
+     */
+    CODE("code"),
 
     /** 纯路由节点：自己不产生输出，只按出边的条件挑一条走。 */
     BRANCH("branch"),
@@ -77,7 +91,8 @@ public enum NodeType {
         return switch (value) {
             case "llm", "model", "prompt", "call" -> AGENT;
             case "call-tool", "invoke", "function" -> TOOL;
-            case "handler", "code", "custom", "java-node" -> JAVA;
+            case "handler", "custom", "java-node" -> JAVA;
+            case "java-code", "object", "behavior" -> CODE;
             case "condition", "switch", "if", "route" -> BRANCH;
             case "assign", "var", "variable" -> SET;
             case "finish", "exit", "result" -> END;

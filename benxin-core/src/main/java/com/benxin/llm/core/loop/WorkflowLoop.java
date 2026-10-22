@@ -184,8 +184,11 @@ public class WorkflowLoop extends AbstractAgentLoop {
      *
      * <p>属性优先于构造时绑定的默认定义 —— 属性是"这一次调用"的意思表示，
      * 默认定义只是"这个 Loop 平时是谁"，前者意图更近，优先级理应更高。</p>
+     *
+     * <p>子类可以覆盖它来收紧来源 —— 例如代码编排只接受 Java 里构造好的定义，
+     * 而不是从属性里读一段 YAML。</p>
      */
-    private WorkflowDefinition resolve(LoopContext ctx) {
+    protected WorkflowDefinition resolve(LoopContext ctx) {
         Object raw = ctx.attributes().get(ATTRIBUTE);
         if (raw == null) {
             raw = ctx.attributes().get(DEFINITION_ATTRIBUTE);
@@ -196,8 +199,8 @@ public class WorkflowLoop extends AbstractAgentLoop {
         if (definition != null) {
             return definition;
         }
-        throw new WorkflowException(NAME, null,
-                "loop=workflow 需要一份工作流定义，但没有找到。三种提供方式：\n"
+        throw new WorkflowException(name(), null,
+                "loop=" + name() + " 需要一份工作流定义，但没有找到。三种提供方式：\n"
                         + "  1) agent.call(input, sessionId, Map.of(\"benxin.workflow\", yamlOrJsonText), stream)；\n"
                         + "  2) 把定义文件放到 llm.workflows.<name>.location，然后用 loop=workflow:<name>；\n"
                         + "  3) 代码里 new WorkflowLoop(definition) 后注册进 LoopRegistry。");

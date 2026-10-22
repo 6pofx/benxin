@@ -1,0 +1,112 @@
+package com.benxin.llm.core.loop;
+
+import com.benxin.llm.core.agent.Agent;
+import com.benxin.llm.core.agent.AgentResult;
+import com.benxin.llm.core.message.ChatMessage;
+import com.benxin.llm.core.model.LlmModel;
+import com.benxin.llm.core.support.ScriptedModel;
+import com.benxin.llm.core.workflow.JavaFlow;
+import com.benxin.llm.core.workflow.NodeOutput;
+import com.benxin.llm.core.workflow.WorkflowDefinition;
+import com.benxin.llm.core.workflow.WorkflowException;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * 代码编排的 Loop 入口：{@code loop = "flow"}。
+ *
+ * <p>重点在两件事：<b>它真的能驱动一个真 Agent</b>，以及<b>它不肯吃 YAML</b> ——
+ * 后者是"两种模式单向不混用"的具体落点。</p>
+ */
+class CodeFlowLoopTest {
+
+    private static WorkflowDefinition reviewFlow() {
+        return JavaFlow.builder("review")
+                .start("begin", "评审：${input}")
+                .agent("analyze", "分析：${begin}")
+                .code("lint", in -> NodeOutput.of("无阻断问题"))
+                .end("done", "分析=${analyze}｜检查=${lint}")
+                .chain("begin", "analyze", "lint", "done")
+                .build();
+    }
+
+    private static Agent agent(AgentLoop loop, LlmModel model, int maxSteps) {
+        return Agent.builder("flow-agent")
+                .model(model)
+                .loop(loop)
+                .maxSteps(maxSteps)
+                .build();
+    }
+
+    @Test
+    @DisplayName("绑定好的代码编排图能跑完一个真 Agent 调用")
+    void runsThroughAgent() {
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("两处命名问题"));
+
+        AgentResult result = agent(CodeFlowLoop.of(reviewFlow()), model, 8).call("这段代码");
+
+        assertThat(result.text()).isEqualTo("分析=两处命名问题｜检查=无阻断问题");
+        assertThat(model.callCount()).isEqualTo(1);
+        // 运行信息与 YAML 模式同口径写回 attributes
+        assertThat(result.attributes()).containsKey(WorkflowLoop.RUN_ATTRIBUTE);
+    }
+
+    @Test
+    @DisplayName("注册名是 flow，描述能看出是代码编排")
+    void exposesNameAndDescription() {
+        CodeFlowLoop bound = CodeFlowLoop.of(reviewFlow());
+
+        assertThat(bound.name()).isEqualTo("flow");
+        assertThat(bound.description()).contains("代码编排").contains("review");
+
+        CodeFlowLoop unbound = new CodeFlowLoop();
+        assertThat(unbound.name()).isEqualTo("flow");
+        assertThat(unbound.description()).contains("JavaFlow");
+    }
+
+    @Test
+    @DisplayName("没绑定图时给出一条能照做的错误")
+    void failsClearlyWhenUnbound() {
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("不该走到这里"));
+
+        assertThatThrownBy(() -> agent(new CodeFlowLoop(), model, 4).call("x"))
+                .isInstanceOf(WorkflowException.class)
+                .hasMessageContaining("代码编排模式")
+                .hasMessageContaining("CodeFlowLoop.of")
+                .hasMessageContaining("loop=workflow");
+    }
+
+    @Test
+    @DisplayName("单向不混用：flow 不读 benxin.workflow 属性里的 YAML")
+    void ignoresYamlFromAttributes() {
+        String yaml = """
+                name: from-yaml
+                nodes:
+                  - id: a
+                    prompt: x
+                """;
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("不该走到这里"));
+
+        // 即便把定义塞进属性，flow 也只认构造时绑定的图 → 没绑定就报错
+        assertThatThrownBy(() -> agent(new CodeFlowLoop(), model, 4)
+                .call("s1", List.of(ChatMessage.user("x")),
+                        Map.of(WorkflowLoop.ATTRIBUTE, yaml), null))
+                .isInstanceOf(WorkflowException.class)
+                .hasMessageContaining("代码编排模式");
+    }
+
+    @Test
+    @DisplayName("内置 Loop 注册表里包含 flow")
+    void isRegisteredAsBuiltin() {
+        LoopRegistry registry = BuiltinLoops.defaultRegistry();
+
+        assertThat(registry.names()).contains("flow", "workflow", "staged");
+        assertThat(registry.get("flow")).isInstanceOf(CodeFlowLoop.class);
+    }
+}

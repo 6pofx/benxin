@@ -65,13 +65,13 @@ class LlmAutoConfigurationTest {
     }
 
     @Test
-    @DisplayName("八个内置 Loop 全部注册，默认是 dsh-minimal")
+    @DisplayName("九个内置 Loop 全部注册，默认是 dsh-minimal")
     void registersBuiltinLoops() {
         runner.run(context -> {
             LoopRegistry loops = context.getBean(LoopRegistry.class);
             assertThat(loops.names()).containsExactlyInAnyOrder(
                     "dsh-minimal", "react", "claude-code", "codex", "plan-execute", "reflexion",
-                    "workflow", "staged");
+                    "workflow", "flow", "staged");
             assertThat(loops.defaultName()).isEqualTo("dsh-minimal");
         });
     }

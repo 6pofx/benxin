@@ -267,21 +267,26 @@ ToolUsePart（模型请求）
 | `plan-execute` | 先规划后执行、逐步回显进度 | 计划走完后追加一轮汇总，否则最终答案只有最后一步 |
 | `reflexion` | 执行 → 自省评分 → 带批评重做 | 解析不到分数时判定为达标终止 —— 无分数无批评的重试只是空转烧 token |
 | `workflow` | 声明式工作流：节点与边写在 YAML/JSON 里 | 见下节；控制流由条件表达式决定，而不是模型的自述 |
+| `flow` | 代码编排：拓扑写在 Java 里（`JavaFlow`），节点行为是绑定的对象 | 与 `workflow` 同一个引擎；定义不可序列化，且只接受代码里构造的图 |
 | `staged` | 结构化编排：规划 → 执行 → 校验 → 修复 → 汇总 | 比 `plan-execute` 多一道验收闸门；校验结论解析不出来时判为通过 |
 
 两个 Loop 都**不引用任何具体工具类**，工具名用字符串判断。
 这样它们才能与任意工具集组合，也才谈得上"一切可插拔"。
 
-### 工作流模式：两条路线，一套分层
+### 工作流模式：三条路线，一套分层
 
-"工作流"这个词容易被当成一件事，其实是两件：**图由外部定义**，还是**流程由代码固化**。
-本心两条都给了，因为它们各自解决不同的问题，而不是同一问题的两种写法。
+"工作流"这个词容易被当成一件事，其实是三件。前两件是**图怎么描述**之争 ——
+写在配置里（`workflow`）还是写在代码里（`flow`）；第三件是**流程能不能提前画出来**之争 ——
+画不出来就别用图，用阶段机（`staged`）。本心三条都给了，因为它们各自解决不同的问题，
+而不是同一问题的三种写法。
 
 ```
 core/workflow/                      ← 领域模型 + 引擎，不依赖任何框架类型
   WorkflowDefinition / Node / Edge    图本身（纯数据，可序列化、可断言、可静态分析）
   WorkflowState                       运行期黑板（变量 + input / last / error / current）
   Templates / Conditions              ${} 插值 与 边条件表达式（含加载期语法校验）
+  FlowView                            谓词条件的只读活视图（代码编排用）
+  JavaFlow                            代码编排 DSL：一行行接线，产出 WorkflowDefinition
   WorkflowRuntime                     五个方法的副作用接口：callAgent / callTool / callHandler / emit / outOfBudget
   WorkflowEngine                      按图推进（分支、循环、重试、预算、护栏、变量回写）
   WorkflowIo                          YAML（SnakeYAML，可选）与 JSON 两条入口，共用一套校验
@@ -291,13 +296,14 @@ core/workflow/                      ← 领域模型 + 引擎，不依赖任何�
 core/loop/                          ← 适配层，唯一与 Agent 运行时耦合的地方
   LoopContextRuntime                 把 WorkflowRuntime 转发到 LoopContext
   WorkflowLoop                       @LlmLoop("workflow")，取定义 → 备黑板 → 跑引擎
+  CodeFlowLoop                       @LlmLoop("flow")，只吃代码里绑定的图
   StagedLoop                         @LlmLoop("staged")，阶段机写死在代码里
 ```
 
 **为什么引擎要独立成一个不依赖框架的包？** 因为"编排"和"接入 Agent"的变化速度完全不同。
 引擎只依赖 `WorkflowRuntime` 那几个方法，于是它的全部行为 —— 走错边、绕不出来、失败没兜住 ——
 都能用一个假运行时精确断言，不需要模型也不需要网络；而适配层可以随框架演进而改，
-不必重新验证编排逻辑。**代价是多了一个接口**，收益是两条路线共用同一套执行语义。
+不必重新验证编排逻辑。**代价是多了一个接口**，收益是三条路线共用同一套执行语义。
 `callHandler` 之所以给的是 `default` 方法，也是同一个考虑：新增能力不该让
 "只实现了一半的假运行时"或第三方的运行时实现编译失败。
 
@@ -323,7 +329,17 @@ core/loop/                          ← 适配层，唯一与 Agent 运行时耦
 3. **节点级 retry / continueOnError** 把"某个工具偶发失败"与"整张图崩掉"分开 ——
    后者还能让出边读 `${error}` 走补偿分支。
 
-**两条路线共用的语义约定**：出边按声明顺序取第一条成立的（顺序即优先级，不需要 `priority` 字段）；
+**代码编排：为什么它不新开一套引擎。** `JavaFlow` 产出的是 `WorkflowDefinition` ——
+同一份数据模型、同一个 `WorkflowEngine`。这么做的理由很实际：如果代码编排另起一套执行路径，
+"边序即优先级""访问上限""`continueOnError` 的补偿语义"就会出现两套口径，
+而**同一件事有两种行为**是这个仓库最想避免的东西。代价是 `WorkflowNode` 要能挂一个活对象
+（`behavior`）与谓词条件（`WorkflowEdge.condition`），于是这两个字段不参与序列化。
+
+由此引出一条硬规则：**含 Java 对象的定义不可序列化**，`WorkflowIo` 必须**明确拒绝**。
+危险的失败方式不是报错，而是静默丢语义 —— 一条谓词边如果没有 `when`，
+照样会被写成无条件边，读回来图就变形了，而且没有任何提示。
+
+**三条路线共用的语义约定**：出边按声明顺序取第一条成立的（顺序即优先级，不需要 `priority` 字段）；
 `branch` / `set` 不产生输出，因此不覆盖 `${last}`；
 节点 id 不允许与 `input` / `last` / `error` / `current` 重名（否则会出现最难查的那类遮蔽 bug）；
 解析不到的占位符保留原文而不是替换成空串（让拼写错误可见）。
@@ -381,6 +397,11 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 工作流里用 `type: java` + `handler: 名字` 引用。定义里写错名字会在**启动期**报错并列出已注册清单，
 不必等任务跑到一半才发现。
 
+**写一段代码编排** → 用 `JavaFlow` 在 Java 里把图接出来，再 `CodeFlowLoop.of(flow)` 跑。
+节点行为是 `WorkflowHandler` 对象（不必注册名字），边条件是 `Predicate<FlowView>`。
+它产出的是同一个 `WorkflowDefinition`，所以校验与语义和 YAML 完全一致 ——
+但这份定义**不可序列化**，写不进配置文件。
+
 **加一个工具** → 在任意 Spring bean 的方法上打 `@LlmTool`；
 或者实现 `ToolCallback` 注册为 bean；或者用 `LlmToolCatalog.register(...)` 动态登记。
 
@@ -412,6 +433,9 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | Java 处理器不能直接指定下一条边 | 保证整张图只有一种路由机制（边条件表达式），分支才看得全 | 处理器只写变量，路由交给 `when:` |
 | 没有 `@LlmNode` 的处理器 bean 让启动失败 | 静默跳过会留下"注册了但用不上"的代码，排查成本极高 | 测试替身也要打注解 |
 | 引用了未注册处理器的定义在启动期失败 | 这纯属静态问题，没理由留到运行期 | 无法"先启动再补注册"（运行时注册仍可用于非 Spring 场景） |
+| 代码编排的定义不可序列化 | 图里挂着活对象（节点行为、谓词条件），写不进 YAML/JSON | 不能由配置热改、不能跨进程传输；要可序列化就用 `workflow` |
+| 代码编排与 YAML 单向不混用 | 混用会让"图从哪来、行为怎么解析"两件事同时变含糊 | `flow` 不认 `benxin.workflow` 属性；YAML 里写 `type: code` 加载期即报错 |
+| 谓词条件抛异常时整次运行失败 | 编程错误应当响亮地暴露，而不是被当成"条件不成立"静默走错分支 | 可预期的异常要由谓词自己兜掉 |
 
 ---
 
@@ -424,6 +448,7 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | Loop | `ScriptedModel`（按脚本吐响应） | 步数、工具序列、文本协议降级 |
 | 工作流引擎 | 假 `WorkflowRuntime`（按节点 id 编排返回值与失败次数） | 分支选择、循环退出、重试、`continueOnError`、预算中断、两道护栏 |
 | 工作流 Java 节点 | 假运行时 + 真实注册表 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、缺处理器时的报错文案 |
+| 代码编排 | `JavaFlow` + 假运行时 | 接线即拓扑、谓词路由与活黑板、谓词异常定位到边、与 YAML 同源的校验、序列化明确拒绝、单向不混用 |
 | Agent | 假模型 + 假沙箱 + 假审批 | 工具闭环、拦截器、记忆、超时、并行顺序 |
 | 集成 | `ApplicationContextRunner` | 条件装配、用户 bean 覆盖、开关语义 |
 | 端到端 | `@SpringBootTest` + `@LlmAgent` 接口 | 注解 → 代理 → 运行时 → 模型 全链路 |
@@ -444,7 +469,8 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | Agent 循环 | `core/loop/` |
 | 工作流引擎（领域模型 / 引擎 / 条件表达式 / 读写） | `core/workflow/` |
 | 工作流 Java 节点的契约与注册表 | `core/workflow/WorkflowHandler.java`, `NodeInput.java`, `NodeOutput.java`, `WorkflowHandlerRegistry.java`, `core/annotation/LlmNode.java` |
-| 工作流的 Agent 适配层与两条路线 | `core/loop/WorkflowLoop.java`, `core/loop/StagedLoop.java`, `core/loop/LoopContextRuntime.java` |
+| 代码编排（DSL 与谓词视图） | `core/workflow/JavaFlow.java`, `core/workflow/FlowView.java`, `core/loop/CodeFlowLoop.java` |
+| 工作流的 Agent 适配层与三条路线 | `core/loop/WorkflowLoop.java`, `core/loop/CodeFlowLoop.java`, `core/loop/StagedLoop.java`, `core/loop/LoopContextRuntime.java` |
 | 运行时引擎 | `core/agent/DefaultAgent.java`, `core/loop/DefaultLoopContext.java` |
 | 提示词模板 | `core/prompt/PromptTemplates.java` |
 | Spring 集成 | `spring/LlmAutoConfiguration.java`, `spring/LlmAgentRegistrar.java` |

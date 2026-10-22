@@ -1,5 +1,6 @@
 package com.benxin.llm.core.workflow;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonPOJOBuilder;
 
@@ -29,6 +30,7 @@ public final class WorkflowNode {
     private final String instruction;
     private final String tool;
     private final String handler;
+    private final WorkflowHandler behavior;
     private final Map<String, Object> args;
     private final Map<String, String> set;
     private final String output;
@@ -44,6 +46,7 @@ public final class WorkflowNode {
         this.instruction = b.instruction;
         this.tool = b.tool;
         this.handler = b.handler;
+        this.behavior = b.behavior;
         this.args = Map.copyOf(b.args);
         this.set = Map.copyOf(b.set);
         this.output = b.output;
@@ -88,6 +91,17 @@ public final class WorkflowNode {
      */
     public String handler() {
         return handler;
+    }
+
+    /**
+     * CODE 节点直接绑定的行为对象；只有 {@link JavaFlow} 会设置。
+     *
+     * <p>与 {@link #handler()} 的区别就是"代码编排"与"声明式"的区别：
+     * 那个是一个字符串名字，运行期去注册表里查；这个是一个活对象，
+     * 可以是 `new` 出来的、也可以是 Spring 注入进来的，能带自己的状态。</p>
+     */
+    public WorkflowHandler behavior() {
+        return behavior;
     }
 
     public Map<String, Object> args() {
@@ -146,6 +160,12 @@ public final class WorkflowNode {
                     throw new IllegalArgumentException(where + " 是 java 节点，必须提供 handler 名称");
                 }
             }
+            case CODE -> {
+                if (behavior == null) {
+                    throw new IllegalArgumentException(where + " 是 code 节点，必须绑定一个 WorkflowHandler"
+                            + "（代码节点只能由 JavaFlow 在 Java 里构造，不能写在 YAML/JSON 里）");
+                }
+            }
             case SET -> {
                 if (set.isEmpty()) {
                     throw new IllegalArgumentException(where + " 是 set 节点，必须提供至少一个 set 键值");
@@ -190,6 +210,7 @@ public final class WorkflowNode {
         private String instruction;
         private String tool;
         private String handler;
+        private WorkflowHandler behavior;
         private final Map<String, Object> args = new LinkedHashMap<>();
         private final Map<String, String> set = new LinkedHashMap<>();
         private String output;
@@ -229,6 +250,13 @@ public final class WorkflowNode {
 
         public Builder handler(String handler) {
             this.handler = handler;
+            return this;
+        }
+
+        /** 只在代码里设置；{@code @JsonIgnore} 让 Jackson 不去尝试实例化一个接口。 */
+        @JsonIgnore
+        public Builder behavior(WorkflowHandler behavior) {
+            this.behavior = behavior;
             return this;
         }
 
