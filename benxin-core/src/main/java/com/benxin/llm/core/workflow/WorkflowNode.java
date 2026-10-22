@@ -27,6 +27,7 @@ public final class WorkflowNode {
     private final NodeType type;
     private final String description;
     private final String prompt;
+    private final String system;
     private final String instruction;
     private final String tool;
     private final String handler;
@@ -43,6 +44,7 @@ public final class WorkflowNode {
         this.type = b.type == null ? NodeType.AGENT : b.type;
         this.description = b.description;
         this.prompt = b.prompt;
+        this.system = b.system;
         this.instruction = b.instruction;
         this.tool = b.tool;
         this.handler = b.handler;
@@ -73,6 +75,19 @@ public final class WorkflowNode {
 
     public String prompt() {
         return prompt;
+    }
+
+    /**
+     * 本节点的<b>系统提示词</b>（模板）：会追加到本次请求的系统提示词之后，
+     * 只在这一节点的模型调用里生效。
+     *
+     * <p>与 {@link #instruction()} 的区别是这个真的走系统通道 —— 在
+     * Anthropic / Gemini 里它是顶层 {@code system} / {@code systemInstruction}，
+     * 而不是混在用户消息里的一段前缀。想给某一步换角色、要求它只输出枚举值，
+     * 用这个；只是想在用户消息前面加句话，用 {@code instruction}。</p>
+     */
+    public String system() {
+        return system;
     }
 
     public String instruction() {
@@ -207,6 +222,7 @@ public final class WorkflowNode {
         private NodeType type;
         private String description;
         private String prompt;
+        private String system;
         private String instruction;
         private String tool;
         private String handler;
@@ -235,6 +251,11 @@ public final class WorkflowNode {
 
         public Builder prompt(String prompt) {
             this.prompt = prompt;
+            return this;
+        }
+
+        public Builder system(String system) {
+            this.system = system;
             return this;
         }
 

@@ -31,6 +31,17 @@ public interface WorkflowRuntime {
     String callAgent(String prompt, WorkflowNode node);
 
     /**
+     * 带<b>节点级系统提示词</b>的 agent 节点。
+     *
+     * <p>{@code system} 是已渲染好的系统提示词，会被<b>追加</b>到本次请求的系统提示词之后；
+     * null / 空白表示不追加。默认实现忽略它并退化为两参版本，这样第三方运行时实现
+     * 不会因为新增能力而编译失败。</p>
+     */
+    default String callAgent(String system, String prompt, WorkflowNode node) {
+        return callAgent(prompt, node);
+    }
+
+    /**
      * 直接调用一个工具，不经过模型。
      *
      * @param args 已渲染好的参数

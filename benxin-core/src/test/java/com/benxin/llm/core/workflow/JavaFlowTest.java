@@ -412,6 +412,86 @@ class JavaFlowTest {
                 .hasMessageContaining("只能二选一");
     }
 
+    // ------------------------------------------------------------------
+    // branchOn：多出口分支
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("branchOn 精确匹配：『通过』不会误命中『不通过』，并会去首尾空白")
+    void branchOnMatchesExactly() {
+        WorkflowDefinition flow = JavaFlow.builder("exact")
+                .start("begin")
+                .agent("judge", "判断")
+                .branchOn("route", "judge", c -> c
+                        .caseOf("通过", "approve")
+                        .caseOf("不通过", "reject")
+                        .otherwise("approve"))
+                .end("approve", "通过")
+                .end("reject", "驳回")
+                .chain("begin", "judge", "route")
+                .build();
+
+        assertThat(run(flow, new FakeRuntime().agentOutput("judge", "不通过"), "x").output())
+                .isEqualTo("驳回");
+        // 模型常带首尾空白与换行，精确匹配前会 trim
+        assertThat(run(flow, new FakeRuntime().agentOutput("judge", "  通过 \n"), "x").output())
+                .isEqualTo("通过");
+    }
+
+    @Test
+    @DisplayName("branchOn 的 otherwise 兜底：不在任何分支里的值不会走错路")
+    void branchOnFallsBack() {
+        WorkflowDefinition flow = JavaFlow.builder("fallback")
+                .start("begin")
+                .agent("judge", "判断")
+                .branchOn("route", "judge", c -> c
+                        .caseOf("通过", "approve")
+                        .otherwise("manual"))
+                .end("approve", "自动通过")
+                .end("manual", "转人工")
+                .chain("begin", "judge", "route")
+                .build();
+
+        assertThat(run(flow, new FakeRuntime().agentOutput("judge", "看不出来"), "x").output())
+                .isEqualTo("转人工");
+    }
+
+    @Test
+    @DisplayName("branchOn 的 whenContains 会连『不通过』一起命中 —— 这个坑写在文档里，也钉在测试里")
+    void whenContainsHasTheSubstringTrap() {
+        WorkflowDefinition flow = JavaFlow.builder("contains")
+                .start("begin")
+                .agent("judge", "判断")
+                .branchOn("route", "judge", c -> c
+                        .whenContains("通过", "approve")
+                        .otherwise("reject"))
+                .end("approve", "通过")
+                .end("reject", "驳回")
+                .chain("begin", "judge", "route")
+                .build();
+
+        // 子串匹配：不通过 里含 通过 → 命中第一条
+        assertThat(run(flow, new FakeRuntime().agentOutput("judge", "不通过"), "x").output())
+                .isEqualTo("通过");
+    }
+
+    @Test
+    @DisplayName("branchOn 两处入口校验：缺变量名、空匹配值都立刻报错")
+    void branchOnValidatesInputs() {
+        assertThatThrownBy(() -> JavaFlow.builder("x").branchOn("route", " ", c -> { }))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("valueName");
+
+        FakeRuntime unused = new FakeRuntime();
+        assertThatThrownBy(() -> run(JavaFlow.builder("y")
+                .start("begin")
+                .branchOn("route", "begin", c -> c.caseOf("  ", "begin"))
+                .edge("begin", "route")
+                .build(), unused, "x"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("不能为空");
+    }
+
     @Test
     @DisplayName("DSL 的计数与 toString 便于排错")
     void exposesShape() {

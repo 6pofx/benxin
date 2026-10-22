@@ -52,6 +52,11 @@ public final class LoopContextRuntime implements WorkflowRuntime {
 
     @Override
     public String callAgent(String prompt, WorkflowNode node) {
+        return callAgent(null, prompt, node);
+    }
+
+    @Override
+    public String callAgent(String system, String prompt, WorkflowNode node) {
         ctx.append(ChatMessage.user(prompt));
         int nodeLimit = node.maxSteps() > 0 ? node.maxSteps() : Integer.MAX_VALUE;
         int calls = 0;
@@ -61,7 +66,7 @@ public final class LoopContextRuntime implements WorkflowRuntime {
                 // 全局预算见底：不再多要一次模型调用，直接用已有的最后一句话收场
                 return lastAssistantText();
             }
-            ChatResponse response = ctx.callModel();
+            ChatResponse response = callModel(system);
             calls++;
             noteTruncation(response, node);
             if (response.message() == null) {
@@ -85,7 +90,7 @@ public final class LoopContextRuntime implements WorkflowRuntime {
         // 后续依赖 ${本节点} 的提示词就会变残缺。
         if (!outOfBudget()) {
             ctx.append(ChatMessage.user("本步骤的工具调用次数已达上限，请直接根据已有信息给出结论，不要再调用工具。"));
-            ChatResponse wrapUp = ctx.callModel();
+            ChatResponse wrapUp = callModel(system);
             noteTruncation(wrapUp, node);
             if (wrapUp.message() != null) {
                 return wrapUp.message().text();
@@ -137,6 +142,16 @@ public final class LoopContextRuntime implements WorkflowRuntime {
         // 而不是静默返回空串让下游去猜。处理器自己抛的异常同样原样上抛，
         // 这样节点的 retry / continueOnError 对 java 节点与其它节点完全一致。
         return handlers.require(handler).handle(input);
+    }
+
+    /**
+     * 节点级系统提示词只有非空时才走覆盖通道。
+     *
+     * <p>空串时仍然调用无参版本 —— 不是省事，而是为了让"没有节点级系统提示词"这条路径
+     * 与其它 Loop 完全一致（自定义 {@code LoopContext} 不覆盖该方法时也不会被影响）。</p>
+     */
+    private ChatResponse callModel(String system) {
+        return system == null || system.isBlank() ? ctx.callModel() : ctx.callModel(system);
     }
 
     @Override

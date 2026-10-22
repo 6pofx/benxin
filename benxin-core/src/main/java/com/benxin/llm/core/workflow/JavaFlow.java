@@ -86,10 +86,25 @@ public final class JavaFlow {
         return add(WorkflowNode.builder(id).type(NodeType.AGENT).prompt(prompt));
     }
 
-    /** 同上，但额外给这一步定角色（会拼在 prompt 之前）。 */
-    public JavaFlow agent(String id, String instruction, String prompt) {
+    /**
+     * 系统提示词与用户提示词<b>分开写</b>：{@code system} 走真正的系统通道，
+     * {@code prompt} 才是这一轮的用户输入。
+     *
+     * <p>系统提示词会被<b>追加</b>到 Agent 级系统提示词之后（不是替换）——
+     * 身份与输出约定通常是全局的，节点级只是在这一步加一层角色约束。
+     * 在 Anthropic / Gemini 上它落在顶层 {@code system} / {@code systemInstruction}，
+     * 而不是混在用户消息里。</p>
+     *
+     * <p>典型用法是"让这一步只输出枚举值"，好让下游的
+     * {@link Cases#caseOf(String, String) 精确分支}可靠：</p>
+     *
+     * <pre>{@code
+     * .agent("judge", "只输出下面三个词之一：通过 / 驳回 / 需补充材料", "请判断：${material}")
+     * }</pre>
+     */
+    public JavaFlow agent(String id, String system, String prompt) {
         return add(WorkflowNode.builder(id).type(NodeType.AGENT)
-                .instruction(instruction).prompt(prompt));
+                .system(system).prompt(prompt));
     }
 
     /** 直接调一个已注册的工具，不经过模型。 */
@@ -121,6 +136,100 @@ public final class JavaFlow {
     /** 纯路由节点：自己不产生输出，只按出边挑一条走。 */
     public JavaFlow branch(String id) {
         return add(WorkflowNode.builder(id).type(NodeType.BRANCH));
+    }
+
+    /**
+     * <b>多出口分支</b>：把"按某个值分几路"写成一组具名分支，而不是散落的一串谓词。
+     *
+     * <pre>{@code
+     * .agent("judge", "只输出：通过 / 驳回 / 需补充材料", "请判断：${material}")
+     * .branchOn("route", "judge", c -> c
+     *         .caseOf("通过", "approve")
+     *         .caseOf("驳回", "reject")
+     *         .caseOf("需补充材料", "supplement")
+     *         .otherwise("approve"))          // 兜底：建议永远写一条
+     * }</pre>
+     *
+     * <p>它只是语法糖：产出的仍是一个 {@code branch} 节点加若干条谓词边，
+     * 因此<b>边序即优先级</b>与手写完全一致，引擎一行没改。分支按书写顺序求值。</p>
+     *
+     * <p>分支节点本身不产生输出：真正决定走向的是 {@code valueName} 指向的值
+     * （可以是某个节点的输出，也可以是 {@code set} 写入的变量）。</p>
+     *
+     * @param id        分支节点 id（本方法会添加这个节点）
+     * @param valueName 要判断的变量名 / 节点 id
+     * @param cases     分支列表；为空时退化为一个普通 branch 节点
+     */
+    public JavaFlow branchOn(String id, String valueName, Consumer<Cases> cases) {
+        if (valueName == null || valueName.isBlank()) {
+            throw new IllegalArgumentException("branchOn 需要指定要判断的值（valueName），例如某个节点的 id");
+        }
+        branch(id);
+        if (cases != null) {
+            cases.accept(new Cases(id, valueName));
+        }
+        return this;
+    }
+
+    /**
+     * {@link #branchOn} 的分支描述器。
+     *
+     * <p>提供两种匹配：{@link #caseOf} 是<b>精确匹配</b>（去首尾空白后相等），
+     * {@link #whenContains} 是<b>子串匹配</b>。默认建议用精确匹配 ——
+     * 它要求上一步"只输出枚举值"，而这正好可以用节点级系统提示词做到
+     * （见 {@link #agent(String, String, String)}）。</p>
+     */
+    public final class Cases {
+
+        private final String from;
+        private final String valueName;
+
+        private Cases(String from, String valueName) {
+            this.from = from;
+            this.valueName = valueName;
+        }
+
+        /**
+         * 精确匹配：{@code 值.trim().equals(expected)}。
+         *
+         * <p>比子串匹配可靠：{@code 通过} 不会误命中 {@code 不通过}。</p>
+         */
+        public Cases caseOf(String expected, String target) {
+            String key = requireText(expected, "caseOf 的匹配值");
+            edge(from, target, v -> v.text(valueName).trim().equals(key));
+            return this;
+        }
+
+        /**
+         * 子串匹配：{@code 值.contains(expected)}。
+         *
+         * <p>适合模型输出带前后缀（"结论：通过"）的场景，但要注意包含关系：
+         * 判断 {@code 通过} 会连 {@code 不通过} 一起命中。要避免这个坑，
+         * 请让上一步只输出枚举值并改用 {@link #caseOf}。</p>
+         */
+        public Cases whenContains(String expected, String target) {
+            String key = requireText(expected, "whenContains 的匹配值");
+            edge(from, target, v -> v.text(valueName).contains(key));
+            return this;
+        }
+
+        /**
+         * 兜底分支（无条件边）。
+         *
+         * <p>建议永远写一条：没有兜底时，一旦值不属于任何分支，
+         * 引擎会按"死胡同"结束整张图（并打一条 warn），而不是悄悄走错分支。</p>
+         */
+        public JavaFlow otherwise(String target) {
+            edge(from, target);
+            return JavaFlow.this;
+        }
+
+        private String requireText(String value, String what) {
+            if (value == null || value.isBlank()) {
+                throw new IllegalArgumentException(what + " 不能为空");
+            }
+            return value;
+        }
     }
 
     /** 写变量：值是模板，运行期渲染后写进黑板。 */

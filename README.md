@@ -656,26 +656,69 @@ Spring 侧会在**启动期**失败并列出已注册清单，而不是等任务
 WorkflowDefinition flow = JavaFlow.builder("review")
         .start("begin", "请评审：${input}")
         .agent("analyze", "分析：${begin}")
-        .code("lint", new LintNode(threshold))            // 任意对象，可 Spring 注入
-        .branch("route")
-        .edge("begin",   "analyze")
-        .edge("analyze", "route")
-        .edge("route",   "fix", v -> v.text("analyze").contains("严重"))   // 谓词，不是字符串
-        .edge("route",   "report")                        // 默认边写在最后
-        .end("report", "结论：${analyze}\n检查：${lint}")
+        .agent("judge",
+               "只输出以下三个词之一：通过 / 驳回 / 需补充材料",   // ← 系统提示词
+               "请判断这段代码：${analyze}")                       // ← 用户提示词
+        .branchOn("route", "judge", c -> c                        // ← 三出口分支
+                .caseOf("通过", "approve")
+                .caseOf("驳回", "fix")
+                .caseOf("需补充材料", "ask"))
+        .end("approve", "通过：${analyze}")
+        .end("ask", "请补充材料后重试")
+        .end("fix", "已开修复单：${judge}")
+        .chain("begin", "analyze", "judge", "route")
         .build();
 ```
+
+**系统提示词与用户提示词分开写**：`agent(id, system, prompt)` 的第二个参数走**真正的系统通道**
+（Anthropic 是顶层 `system`、Gemini 是 `systemInstruction`），并**追加**在 Agent 级系统提示词之后，
+而不是替换它。`instruction` 那个老字段仍在，但它是"混在用户消息前面的一段话"——
+要换角色、要约束输出格式，请用 `system`。
+
+> 这条与下面的分支配合得很好：让 `judge` 只输出枚举值，下游的 `caseOf` 才能做**精确匹配**。
+
+**复杂分支：`branchOn`**。多出口不用再摊开写一串谓词：
 
 ```java
-@LlmAgent(model = "deepseek", loop = "flow")              // 需要把图注册成 bean
-public interface Reviewer { String review(String code); }
-
-// 或者程序化装配，不经过注解：
-Agent agent = Agent.builder("reviewer")
-        .model("deepseek")
-        .loop(CodeFlowLoop.of(flow))
-        .build();
+.branchOn("route", "judge", c -> c
+        .caseOf("通过", "approve")          // 精确匹配（去首尾空白后相等）
+        .caseOf("驳回", "fix")
+        .whenContains("补充", "ask")        // 子串匹配：适合"结论：需补充材料"这种
+        .otherwise("approve"))              // 兜底，建议永远写一条
 ```
+
+`caseOf` 精确、`whenContains` 子串。**默认建议用精确匹配** —— 子串匹配有个经典坑：
+判断 `通过` 会把 `不通过` 一起命中（这条也钉在测试里）。`otherwise` 对应无条件边；
+不写兜底时，值不属于任何分支会按"死胡同"结束整张图并打一条 warn。
+
+**回边与多终点**：把边指回上游节点就是循环，多个 `end` 节点就是多个出口。
+"材料不合格 → 补材料 → 重新进审核"这种回流直接写就行：
+
+```java
+.start("begin", "材料：${input}")
+.agent("judge", "只输出：通过 / 驳回 / 需补充材料", "请判断：${begin}")
+.branchOn("route", "judge", c -> c
+        .caseOf("通过", "approve")
+        .caseOf("驳回", "reject")
+        .caseOf("需补充材料", "supplement"))
+.code("supplement", in -> NodeOutput.of("已补材料", Map.of("supplemented", true)))
+.branchOn("recheck", "supplemented", c -> c
+        .caseOf("true", "begin")          // ← 回到入口节点重跑
+        .otherwise("giveup"))
+.end("approve", "审批通过：${judge}")
+.end("reject", "已驳回：${judge}")
+.end("giveup", "放弃：${judge}")
+```
+
+环由引擎的两道护栏兜住（步数预算 + `maxVisitsPerNode`），不会无声转圈。
+回到某节点意味着**它的模型调用会重新发生一次**、历史继续增长 —— 这正是"带着反馈重做"想要的效果。
+
+**做不到的：一个节点同时走多条边。** 引擎每次只选一条成立的边，
+所以"Mermaid 里那条虚线并行通知"不能直接表达。替代路线：
+① 把通知放进 `tool` 或代码节点内部（一次调用 / 一次事件广播）；
+② 拆成两条工作流，在外部并行调度；
+③ 等一个真正带汇合语义的 `fork` 节点 —— 那会把图变成调度器，属于另一个量级的设计。
+这是刻意的取舍，不是遗漏。
 
 **三个收益**（YAML 模式给不了的）：
 
@@ -695,7 +738,8 @@ Agent agent = Agent.builder("reviewer")
 
 **同一个引擎**：`JavaFlow` 产出的就是 `WorkflowDefinition`，因此边序即优先级、
 `maxVisitsPerNode` 护栏、`retry` / `continueOnError`、预算中断、事件与变量回写，
-与 YAML 模式完全一致 —— 换写法不用重学一套语义。
+与 YAML 模式完全一致 —— 换写法不用重学一套语义。`branchOn` 也只是糖：
+它产出的仍是一个 `branch` 节点加若干条谓词边，引擎一行没改。
 
 ### 三、结构化编排：`staged` —— 流程固化在代码里
 
@@ -1111,7 +1155,7 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 ```bash
 git clone https://github.com/6pofx/benxin.git
 cd benxin
-mvn -o test                          # 281 个离线用例，不联网、不花钱
+mvn -o test                          # 287 个离线用例，不联网、不花钱
 ```
 
 ---
@@ -1153,6 +1197,8 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 | 项 | 说明 |
 |---|---|
 | **代码编排：`flow`** | 第三种编排路线 —— 拓扑用 `JavaFlow` 写在 Java 里，节点行为是直接绑定的对象（`type: code`），边条件是 `Predicate<FlowView>`。与 YAML 模式**共用同一个引擎**（边序优先级、访问上限、重试、预算、事件语义完全一致），但定义**不可序列化**：`WorkflowIo` 会明确拒绝写出含 Java 对象的图，而不是静默丢条件。**单向不混用**：YAML 里不能引用代码节点，`flow` 也不认 `benxin.workflow` 属性里的 YAML（见[工作流模式](#工作流模式)） |
+| **节点级系统提示词** | `agent(id, system, prompt)` / 节点上的 `system` 字段：走真正的系统通道（Anthropic 顶层 `system`、Gemini `systemInstruction`），**追加**在 Agent 级之后而不是替换。此前只能在用户消息前面拼一段（`instruction`），在 Anthropic/Gemini 上根本不是系统提示词 |
+| **`branchOn`：多出口分支** | `caseOf` 精确匹配 / `whenContains` 子串匹配 / `otherwise` 兜底，编译成一个 `branch` 节点加若干谓词边（引擎未改）。精确匹配专治"通过 vs 不通过"的子串误命中 |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
 | **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
@@ -1255,7 +1301,7 @@ cd benxin
 mvn -o test
 ```
 
-**281 个测试全部通过**（benxin-core 237 / starter 44，共 23 个测试类），
+**287 个测试全部通过**（benxin-core 243 / starter 44，共 23 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1299,8 +1345,8 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `WorkflowLoopTest` | 11 | `workflow:<name>` Loop 的装配、属性传定义、运行结果写回 attributes、`java` 节点端到端 |
 | `WorkflowHandlerRegistryTest` | 8 | `@LlmNode` 上的名字即唯一契约、缺注解报错、缺处理器时列出可用清单、同名后设者胜 |
 | `WorkflowJavaNodeTest` | 10 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、变量保型、重试与补偿、可作循环体 |
-| `JavaFlowTest` | 16 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝 |
-| `CodeFlowLoopTest` | 5 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册 |
+| `JavaFlowTest` | 20 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝、`branchOn` 精确匹配（含"通过/不通过"子串坑）与兜底 |
+| `CodeFlowLoopTest` | 7 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册、**节点级系统提示词真的走系统通道**、**三出口 + 回边 + 多终点** |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
 | `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |

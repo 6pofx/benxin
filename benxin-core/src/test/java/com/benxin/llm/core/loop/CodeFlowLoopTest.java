@@ -2,13 +2,16 @@ package com.benxin.llm.core.loop;
 
 import com.benxin.llm.core.agent.Agent;
 import com.benxin.llm.core.agent.AgentResult;
+import com.benxin.llm.core.chat.ChatRequest;
 import com.benxin.llm.core.message.ChatMessage;
+import com.benxin.llm.core.message.Role;
 import com.benxin.llm.core.model.LlmModel;
 import com.benxin.llm.core.support.ScriptedModel;
 import com.benxin.llm.core.workflow.JavaFlow;
 import com.benxin.llm.core.workflow.NodeOutput;
 import com.benxin.llm.core.workflow.WorkflowDefinition;
 import com.benxin.llm.core.workflow.WorkflowException;
+import com.benxin.llm.core.workflow.WorkflowRun;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -108,5 +111,84 @@ class CodeFlowLoopTest {
 
         assertThat(registry.names()).contains("flow", "workflow", "staged");
         assertThat(registry.get("flow")).isInstanceOf(CodeFlowLoop.class);
+    }
+
+    // ------------------------------------------------------------------
+    // 节点级系统提示词
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("节点级系统提示词真的走系统通道：追加在 Agent 级之后，不混进用户消息")
+    void nodeSystemPromptGoesToSystemChannel() {
+        WorkflowDefinition flow = JavaFlow.builder("sys")
+                .start("begin", "${input}")
+                .agent("judge", "只输出以下三个词之一：通过 / 驳回 / 需补充材料", "请判断这份材料：${begin}")
+                .end("done", "${judge}")
+                .chain("begin", "judge", "done")
+                .build();
+
+        ScriptedModel model = ScriptedModel.of(ScriptedModel.text("通过"));
+
+        AgentResult result = Agent.builder("sys-agent")
+                .model(model)
+                .loop(CodeFlowLoop.of(flow))
+                .systemPrompt("你是审批助手。")
+                .maxSteps(6)
+                .build()
+                .call("材料 A");
+
+        assertThat(result.text()).isEqualTo("通过");
+
+        ChatRequest request = model.lastRequest();
+        // 系统通道里：Agent 级在前，节点级在后
+        assertThat(request.systemText())
+                .contains("你是审批助手")
+                .contains("只输出以下三个词之一");
+        // 用户消息里没有混入系统提示词
+        assertThat(request.messages())
+                .filteredOn(m -> m.role() == Role.USER)
+                .noneMatch(m -> m.text().contains("只输出以下三个词之一"));
+    }
+
+    // ------------------------------------------------------------------
+    // 多出口 + 回边
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("三出口分支 + 回到入口节点重跑 + 多个终点：图里最复杂的那类结构确实可表达")
+    void reworkLoopsBackToEntryAndCanEndInSeveralPlaces() {
+        WorkflowDefinition flow = JavaFlow.builder("rework")
+                .start("begin", "材料：${input}")
+                .agent("judge", "只输出：通过 / 驳回 / 需补充材料", "请判断：${begin}")
+                .branchOn("route", "judge", c -> c
+                        .caseOf("通过", "approve")
+                        .caseOf("驳回", "reject")
+                        .caseOf("需补充材料", "supplement"))
+                .code("supplement", in -> NodeOutput.of("已补材料", Map.of("supplemented", true)))
+                .branchOn("recheck", "supplemented", c -> c
+                        .caseOf("true", "begin")        // 回边：重新走入口节点
+                        .otherwise("giveup"))
+                .end("approve", "审批通过：${judge}")
+                .end("reject", "已驳回：${judge}")
+                .end("giveup", "放弃：${judge}")
+                .chain("begin", "judge", "route")
+                .chain("supplement", "recheck")
+                .build();
+
+        // 第一次判"需补充材料"→ 补材料 → recheck 为 true → 回到 begin；第二次判"通过"
+        ScriptedModel model = ScriptedModel.of(
+                ScriptedModel.text("需补充材料"),
+                ScriptedModel.text("通过"));
+
+        AgentResult result = agent(CodeFlowLoop.of(flow), model, 12).call("材料 A");
+
+        assertThat(result.text()).isEqualTo("审批通过：通过");
+        assertThat(model.callCount()).isEqualTo(2);
+
+        WorkflowRun run = (WorkflowRun) result.attributes().get(WorkflowLoop.RUN_ATTRIBUTE);
+        assertThat(run.visited()).containsExactly(
+                "begin", "judge", "route", "supplement", "recheck",
+                "begin", "judge", "route", "approve");
+        assertThat(run.completed()).isTrue();
     }
 }

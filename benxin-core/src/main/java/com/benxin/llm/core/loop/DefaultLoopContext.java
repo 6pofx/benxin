@@ -201,13 +201,44 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
 
     @Override
     public ChatResponse callModel() {
-        ChatResponse response = callModel(messages);
-        append(response.message());
-        return response;
+        return callAndAppend(systemPrompt);
+    }
+
+    @Override
+    public ChatResponse callModel(String systemSuffix) {
+        return callAndAppend(mergeSystem(systemPrompt, systemSuffix));
     }
 
     @Override
     public ChatResponse callModel(List<ChatMessage> history) {
+        return doCallModel(history, systemPrompt);
+    }
+
+    /**
+     * 合并本次调用实际要用的系统提示词：Agent 级在前，节点级在后。
+     *
+     * <p>选择"追加"而不是"替换"是刻意的：Agent 级的身份、输出约定对整个任务都成立，
+     * 节点级只是在这一步加一层角色约束。替换会静默丢掉前者，而那通常是用户没意识到的事。</p>
+     */
+    private static String mergeSystem(String base, String suffix) {
+        if (suffix == null || suffix.isBlank()) {
+            return base;
+        }
+        if (base == null || base.isBlank()) {
+            return suffix;
+        }
+        return base + "\n\n" + suffix;
+    }
+
+    /** 用当前历史调一次模型并把响应追加进历史。 */
+    private ChatResponse callAndAppend(String system) {
+        ChatResponse response = doCallModel(messages, system);
+        append(response.message());
+        return response;
+    }
+
+    /** 真正组装并下发请求的地方；{@code system} 是本次调用实际使用的系统提示词。 */
+    private ChatResponse doCallModel(List<ChatMessage> history, String system) {
         int current = step.incrementAndGet();
         AgentListener listener = listener();
         listener.onStepStart(agentName(), current);
@@ -216,7 +247,7 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
                 // 刻意不把 spec().model()（= 模型注册名）塞进 ChatRequest.model：
                 // 那个字段的语义是"下发给上游的模型 id"，由 HttpLlmModel 从 ModelConfig 取。
                 // 把注册名混进去会让 `llm.models.<key>.model` 被静默覆盖成 key 本身。
-                .messages(contextManager().prepare(systemPrompt, history, model()))
+                .messages(contextManager().prepare(system, history, model()))
                 .tools(tools().specs())
                 .temperature(spec().temperature() < 0 ? null : spec().temperature())
                 .maxTokens(spec().maxTokens() < 0 ? null : spec().maxTokens())

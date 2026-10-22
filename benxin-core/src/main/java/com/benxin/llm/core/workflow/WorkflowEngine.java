@@ -273,7 +273,8 @@ public final class WorkflowEngine {
                         : state.render(node.prompt());
                 yield Outcome.of(text);
             }
-            case AGENT -> Outcome.of(runtime.callAgent(compose(node, state), node));
+            case AGENT -> Outcome.of(runtime.callAgent(
+                    state.render(node.system()), compose(node, state), node));
             case TOOL -> {
                 Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
                 yield Outcome.of(runtime.callTool(node.tool(), args, node));

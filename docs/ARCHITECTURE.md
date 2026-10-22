@@ -287,7 +287,7 @@ core/workflow/                      ← 领域模型 + 引擎，不依赖任何�
   Templates / Conditions              ${} 插值 与 边条件表达式（含加载期语法校验）
   FlowView                            谓词条件的只读活视图（代码编排用）
   JavaFlow                            代码编排 DSL：一行行接线，产出 WorkflowDefinition
-  WorkflowRuntime                     五个方法的副作用接口：callAgent / callTool / callHandler / emit / outOfBudget
+  WorkflowRuntime                     副作用接口：callAgent（另有带系统提示词的重载）/ callTool / callHandler / emit / outOfBudget
   WorkflowEngine                      按图推进（分支、循环、重试、预算、护栏、变量回写）
   WorkflowIo                          YAML（SnakeYAML，可选）与 JSON 两条入口，共用一套校验
   WorkflowHandler / NodeInput / NodeOutput    Java 节点的契约（只读快照进、文本+变量出）
@@ -436,6 +436,10 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | 代码编排的定义不可序列化 | 图里挂着活对象（节点行为、谓词条件），写不进 YAML/JSON | 不能由配置热改、不能跨进程传输；要可序列化就用 `workflow` |
 | 代码编排与 YAML 单向不混用 | 混用会让"图从哪来、行为怎么解析"两件事同时变含糊 | `flow` 不认 `benxin.workflow` 属性；YAML 里写 `type: code` 加载期即报错 |
 | 谓词条件抛异常时整次运行失败 | 编程错误应当响亮地暴露，而不是被当成"条件不成立"静默走错分支 | 可预期的异常要由谓词自己兜掉 |
+| 节点级 `system` 是**追加**而非替换 Agent 级提示词 | 身份与输出约定通常对全局成立，节点级只是加一层角色约束；替换会静默丢掉前者 | 想完全接管系统提示词，需要自己在节点里拼（或改 Agent 级） |
+| `callModel(String)` 在 `LoopContext` 上是 `default`（默认忽略） | 不想强迫其它 Loop 与第三方 `LoopContext` 实现改代码 | 自定义 `LoopContext` 不覆盖它时，节点的 `system` 会被**静默忽略** |
+| `branchOn` 只是 DSL 糖 | 一个 `branch` 节点加若干谓词边就够了，引擎不必知道"switch"这个概念 | 它不可序列化（带谓词）；YAML 侧仍要手写 `when:` |
+| 一个节点每次只走**一条**出边 | 一旦允许多边同时走，"汇合怎么等、失败怎么算、访问表怎么记"会立刻把图变成调度器 | Mermaid 里那种"并行通知"虚线边无法直接表达，只能放进工具/代码节点或拆成两条工作流 |
 
 ---
 
@@ -448,7 +452,8 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | Loop | `ScriptedModel`（按脚本吐响应） | 步数、工具序列、文本协议降级 |
 | 工作流引擎 | 假 `WorkflowRuntime`（按节点 id 编排返回值与失败次数） | 分支选择、循环退出、重试、`continueOnError`、预算中断、两道护栏 |
 | 工作流 Java 节点 | 假运行时 + 真实注册表 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、缺处理器时的报错文案 |
-| 代码编排 | `JavaFlow` + 假运行时 | 接线即拓扑、谓词路由与活黑板、谓词异常定位到边、与 YAML 同源的校验、序列化明确拒绝、单向不混用 |
+| 代码编排 | `JavaFlow` + 假运行时 | 接线即拓扑、谓词路由与活黑板、谓词异常定位到边、与 YAML 同源的校验、序列化明确拒绝、单向不混用、`branchOn` 精确匹配与兜底 |
+| 节点级系统提示词 | `ScriptedModel` 记录下来的真实 `ChatRequest` | 走系统通道（不是用户消息）、追加在 Agent 级之后、用户消息里不混入 |
 | Agent | 假模型 + 假沙箱 + 假审批 | 工具闭环、拦截器、记忆、超时、并行顺序 |
 | 集成 | `ApplicationContextRunner` | 条件装配、用户 bean 覆盖、开关语义 |
 | 端到端 | `@SpringBootTest` + `@LlmAgent` 接口 | 注解 → 代理 → 运行时 → 模型 全链路 |

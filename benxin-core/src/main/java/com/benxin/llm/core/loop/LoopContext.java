@@ -96,6 +96,25 @@ public interface LoopContext {
     }
 
     /**
+     * 用当前 {@link #messages()} 调一次模型，并把 {@code systemSuffix} <b>追加</b>到
+     * 本次请求的系统提示词之后；响应同样追加进历史。
+     *
+     * <p><b>为什么需要这个方法？</b> 系统提示词在请求里是<b>顶层字段</b>
+     * （Anthropic 的 {@code system}、Gemini 的 {@code systemInstruction} 根本不在消息列表里），
+     * 而且 {@code DefaultContextManager} 会把历史里的 SYSTEM 消息一律丢弃 ——
+     * 所以"往历史里插一条 system 消息"这条路是走不通的，想按节点切换系统提示词，
+     * 只能在请求构造这一层开口子。</p>
+     *
+     * <p>默认实现<b>忽略</b> {@code systemSuffix} 并退化为 {@link #callModel()}：
+     * 其它 Loop 不需要按节点切系统提示词，加 {@code default} 是为了不强迫它们改代码。
+     * 自定义 {@code LoopContext} 若不覆盖它，工作流节点的 {@code system} 会被静默忽略
+     * —— 这一点在 {@link #callModel(String)} 的约定里写明，而不是假装支持。</p>
+     */
+    default ChatResponse callModel(String systemSuffix) {
+        return callModel();
+    }
+
+    /**
      * 执行模型请求的一批工具调用，返回可直接追加进历史的结果消息。
      * 内部完成：沙箱校验 → 审批 → 拦截器 → 执行 → 超时与截断 → 事件广播。
      */
