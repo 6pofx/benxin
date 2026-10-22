@@ -691,6 +691,21 @@ WorkflowDefinition flow = JavaFlow.builder("review")
 判断 `通过` 会把 `不通过` 一起命中（这条也钉在测试里）。`otherwise` 对应无条件边；
 不写兜底时，值不属于任何分支会按"死胡同"结束整张图并打一条 warn。
 
+判定节点本身产出结论时（Mermaid 里的菱形常常既是"审核"又是"分流"），用 `routeFrom`
+把分叉直接挂在它身上，不必多插一个纯路由节点：
+
+```java
+.agent("F", "只输出：通过 / 驳回 / 需补充材料", "请给出审核结论：\n${last}")
+.routeFrom("F", "F", c -> c          // 直接读 F 自己的输出
+        .caseOf("通过", "G")
+        .caseOf("驳回", "H")
+        .caseOf("需补充材料", "I"))
+```
+
+> **想看一张完整的图？** `OrderApprovalFlowTest` 把一份 **26 节点 / 31 边 / 4 个终点**的订单审核流程
+> 用这套 DSL 原样写了出来，并用 5 个场景（校验失败 / 驳回 / 补充材料回边 / 超时关闭 /
+> 重提回边）把每条路径都跑了一遍、把 `visited` 逐节点断言住。
+
 **回边与多终点**：把边指回上游节点就是循环，多个 `end` 节点就是多个出口。
 "材料不合格 → 补材料 → 重新进审核"这种回流直接写就行：
 
@@ -1155,7 +1170,7 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 ```bash
 git clone https://github.com/6pofx/benxin.git
 cd benxin
-mvn -o test                          # 287 个离线用例，不联网、不花钱
+mvn -o test                          # 293 个离线用例，不联网、不花钱
 ```
 
 ---
@@ -1199,6 +1214,8 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 | **代码编排：`flow`** | 第三种编排路线 —— 拓扑用 `JavaFlow` 写在 Java 里，节点行为是直接绑定的对象（`type: code`），边条件是 `Predicate<FlowView>`。与 YAML 模式**共用同一个引擎**（边序优先级、访问上限、重试、预算、事件语义完全一致），但定义**不可序列化**：`WorkflowIo` 会明确拒绝写出含 Java 对象的图，而不是静默丢条件。**单向不混用**：YAML 里不能引用代码节点，`flow` 也不认 `benxin.workflow` 属性里的 YAML（见[工作流模式](#工作流模式)） |
 | **节点级系统提示词** | `agent(id, system, prompt)` / 节点上的 `system` 字段：走真正的系统通道（Anthropic 顶层 `system`、Gemini `systemInstruction`），**追加**在 Agent 级之后而不是替换。此前只能在用户消息前面拼一段（`instruction`），在 Anthropic/Gemini 上根本不是系统提示词 |
 | **`branchOn`：多出口分支** | `caseOf` 精确匹配 / `whenContains` 子串匹配 / `otherwise` 兜底，编译成一个 `branch` 节点加若干谓词边（引擎未改）。精确匹配专治"通过 vs 不通过"的子串误命中 |
+| **`routeFrom`：判定节点直接分叉** | 判断节点自己产出结论时（Mermaid 的菱形常既是"审核"又是"分流"），分叉边直接挂在这个节点上，不再多插一个纯路由节点，`${last}` 也不会多一层 |
+| **真实流程图示例** | `OrderApprovalFlowTest`：订单审核流程 26 节点 / 31 边 / 4 终点 / 2 回边，5 个场景逐节点断言执行路径 |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
 | **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
@@ -1301,7 +1318,7 @@ cd benxin
 mvn -o test
 ```
 
-**287 个测试全部通过**（benxin-core 243 / starter 44，共 23 个测试类），
+**293 个测试全部通过**（benxin-core 249 / starter 44，共 24 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1347,6 +1364,7 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `WorkflowJavaNodeTest` | 10 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、变量保型、重试与补偿、可作循环体 |
 | `JavaFlowTest` | 20 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝、`branchOn` 精确匹配（含"通过/不通过"子串坑）与兜底 |
 | `CodeFlowLoopTest` | 7 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册、**节点级系统提示词真的走系统通道**、**三出口 + 回边 + 多终点** |
+| `OrderApprovalFlowTest` | 6 | **一张完整的真实流程图**（订单审核，26 节点 / 31 边 / 4 终点 / 2 回边）：5 个场景逐节点断言 `visited`，外加图结构断言（并行支线 T/U/V 未出现） |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
 | `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |

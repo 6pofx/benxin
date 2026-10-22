@@ -161,12 +161,34 @@ public final class JavaFlow {
      * @param cases     分支列表；为空时退化为一个普通 branch 节点
      */
     public JavaFlow branchOn(String id, String valueName, Consumer<Cases> cases) {
-        if (valueName == null || valueName.isBlank()) {
-            throw new IllegalArgumentException("branchOn 需要指定要判断的值（valueName），例如某个节点的 id");
-        }
         branch(id);
+        return routeFrom(id, valueName, cases);
+    }
+
+    /**
+     * 从<b>已存在的节点</b>直接分叉：不新增 branch 节点，分叉边直接挂在这个节点上。
+     *
+     * <p>Mermaid 里的判断菱形经常既是"调用/审核"又是"分流"（比如"风控审核结论"），
+     * 这种时候再插一个纯路由节点会让图多一跳、${last} 也多一层。用它就能把
+     * "产出结论"和"按结论走"落在同一个节点上。</p>
+     *
+     * <pre>{@code
+     * .agent("F", "只输出：通过 / 驳回 / 需补充材料", "请给出结论：\n${last}")
+     * .routeFrom("F", "F", c -> c            // 直接读 F 自己的输出
+     *         .caseOf("通过", "G")
+     *         .caseOf("驳回", "H")
+     *         .caseOf("需补充材料", "I"))
+     * }</pre>
+     */
+    public JavaFlow routeFrom(String from, String valueName, Consumer<Cases> cases) {
+        if (valueName == null || valueName.isBlank()) {
+            throw new IllegalArgumentException("路由需要指定要判断的值（valueName），例如某个节点的 id");
+        }
+        if (from == null || from.isBlank()) {
+            throw new IllegalArgumentException("路由需要指定起点节点 id（from）");
+        }
         if (cases != null) {
-            cases.accept(new Cases(id, valueName));
+            cases.accept(new Cases(from, valueName));
         }
         return this;
     }

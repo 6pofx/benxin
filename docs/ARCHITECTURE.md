@@ -452,7 +452,7 @@ HTTP 端点同样默认关闭（`llm.web.enabled=false`）：一个能触发模�
 | Loop | `ScriptedModel`（按脚本吐响应） | 步数、工具序列、文本协议降级 |
 | 工作流引擎 | 假 `WorkflowRuntime`（按节点 id 编排返回值与失败次数） | 分支选择、循环退出、重试、`continueOnError`、预算中断、两道护栏 |
 | 工作流 Java 节点 | 假运行时 + 真实注册表 | 参数渲染、文本/变量两条输出通道、`none()` 不覆盖 `last`、只读快照不可变、缺处理器时的报错文案 |
-| 代码编排 | `JavaFlow` + 假运行时 | 接线即拓扑、谓词路由与活黑板、谓词异常定位到边、与 YAML 同源的校验、序列化明确拒绝、单向不混用、`branchOn` 精确匹配与兜底 |
+| 代码编排 | `JavaFlow` + 假运行时 + 一张真实流程图 | 接线即拓扑、谓词路由与活黑板、谓词异常定位到边、与 YAML 同源的校验、序列化明确拒绝、单向不混用、`branchOn` 精确匹配与兜底；`OrderApprovalFlowTest` 用 26 节点 / 31 边 / 4 终点 / 2 回边的订单审核图做端到端回归 |
 | 节点级系统提示词 | `ScriptedModel` 记录下来的真实 `ChatRequest` | 走系统通道（不是用户消息）、追加在 Agent 级之后、用户消息里不混入 |
 | Agent | 假模型 + 假沙箱 + 假审批 | 工具闭环、拦截器、记忆、超时、并行顺序 |
 | 集成 | `ApplicationContextRunner` | 条件装配、用户 bean 覆盖、开关语义 |
