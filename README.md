@@ -781,11 +781,30 @@ WorkflowDefinition flow = JavaFlow.builder("review")
 String mermaid = Mermaid.toMermaid(orderApproval());   // 粘到任何支持 Mermaid 的地方
 ```
 
-**上下文怎么走。** 节点提示词不是"替换历史"，而是**追加**进同一条对话：每次 `callModel` 发的都是
-整份历史（含此前所有节点、工具调用与结果），所以下游节点看到的是完整上文，不会只剩一个"通过"。
-要留意的是另外两点：① 长流程会让历史持续变长，逼近预算时上下文管理器会**压缩**，早期细节可能被摘要掉；
-② 提示词里引用 `${last}` 只是"提醒模型看这句"，不等于"只给它这句"。
-稳妥的写法是**该传的事实用变量显式传**（`${amount}`、`${verdict}`），别指望模型从二十轮历史里自己捞。
+**上下文：默认隔离，事实显式传。** 每个 agent 节点默认**只看得到自己那条提示词**
+（`NodeContext.ISOLATED`），模型看不到前面节点聊过什么。这不是为了省 token，而是让节点成为函数：
+**同输入必然同提示词**。
+
+```java
+.agent("F", "你是风控审核员", "请根据订单 ${orderId}（金额 ${amount}）给出结论：\n${last}",
+       "通过", "驳回", "需补充材料")
+```
+
+上面这句里，模型能看到的只有 `${orderId}`、`${amount}`、`${last}` 三个值 —— 它们由前面的节点写进
+黑板，再由模板显式渲染。**该传的事实必须写进提示词，漏了就是漏了，不会靠历史兜底。**
+这也顺带解决了长流程的老问题：历史不增长，就不会出现"跑到第 20 个节点触发压缩、早期细节被摘要掉"。
+
+需要"接着上面那段话继续说"时显式开共享：
+
+```java
+.agentShared("G", "你是同一个审核员", "继续刚才那个判断，补充理由")
+```
+
+代价要清楚：提示词随历史变化、成本随图增长、行为不再可复现。另外**隔离节点不往共享历史里写东西** ——
+"隔离 A + 共享 B"时 B 也看不到 A，A 的结论只能通过 `${A}` 传。
+
+> 提示词里留了没人写过的变量（`${mount}` 这种拼错），引擎会发一条 `workflow.unresolved-variable`
+> 事件把名字报出来 —— 隔离模式下没有历史兜底，静默的拼写错误比以往更致命。
 
 ### 三、结构化编排：`staged` —— 流程固化在代码里
 
@@ -1201,7 +1220,7 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 ```bash
 git clone https://github.com/6pofx/benxin.git
 cd benxin
-mvn -o test                          # 306 个离线用例，不联网、不花钱
+mvn -o test                          # 312 个离线用例，不联网、不花钱
 ```
 
 ---
@@ -1250,6 +1269,7 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 | **输出契约 `choice`** | agent 节点声明"只能吐这几个值"，由框架做归一化（Markdown/标点/客气话）+ 纠正重试（最多 2 次）+ 用尽即失败。分支判定不再依赖"模型照做" |
 | **`Mermaid.toMermaid`** | 把代码里的图导回 `flowchart TD`（形状按节点类型、边标签取自 `caseOf`），用于代码与设计稿互查 |
 | **`describe(id, …)`** | 给节点补一句说明：只影响导出的图与可读性，不参与任何运行时语义 |
+| **节点上下文默认隔离** | `NodeContext.ISOLATED`（默认）：agent 节点只看得到自己那条提示词，事实必须靠 `${...}` 显式传；`agentShared(...)` / `context: shared` 才继承整段对话。附 `workflow.unresolved-variable` 事件，把拼错的变量名报出来 |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
 | **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
@@ -1352,7 +1372,7 @@ cd benxin
 mvn -o test
 ```
 
-**306 个测试全部通过**（benxin-core 262 / starter 44，共 25 个测试类），
+**312 个测试全部通过**（benxin-core 268 / starter 44，共 26 个测试类），
 全部离线、不消耗 token：
 
 ### 1.1.1 的验证方式
@@ -1399,7 +1419,8 @@ Web ：POST /chat（@LlmAgent(stream=true)）→ Content-Type: text/event-stream
 | `JavaFlowTest` | 20 | 代码编排：接线即拓扑、谓词路由与活黑板、边序优先级、谓词异常定位到边、`none()` 不覆盖 `last`、重试与补偿、访问上限、与 YAML 同源的校验、序列化明确拒绝、`branchOn` 精确匹配（含"通过/不通过"子串坑）与兜底 |
 | `CodeFlowLoopTest` | 11 | `loop=flow`：真 Agent 跑通、未绑定图时的可照做报错、**不认 `benxin.workflow` 属性里的 YAML**（单向不混用）、内置注册、**节点级系统提示词真的走系统通道**、**三出口 + 回边 + 多终点**、**输出契约**（Markdown/客气话归一化、纠正重试、重试用尽即失败） |
 | `ChoiceContractTest` | 7 | 输出契约的判定规则：围栏/加粗/引号/尾标点/"结论："前缀、"不通过"不算"通过"、互为子串取最具体、判不出来就返回 null |
-| `OrderApprovalFlowTest` | 8 | **一张完整的真实流程图**（订单审核，26 节点 / 31 边 / 4 终点 / 2 回边）：5 个场景逐节点断言 `visited`、模型不听话也不走错路、**导出 Mermaid 与设计稿同构**、并行支线 T/U/V 未出现 |
+| `NodeContextTest` | 6 | 节点上下文：默认隔离只看自己那条提示词、`shared` 才继承对话、**隔离节点不往共享历史里写**、长流程请求不增长、YAML 开关往返、未解析变量上报事件 |
+| `OrderApprovalFlowTest` | 8 | **一张完整的真实流程图**（订单审核，26 节点 / 31 边 / 4 终点 / 2 回边）：5 个场景逐节点断言 `visited`、模型不听话也不走错路、**20 个节点跑完每次请求仍只有一条用户消息**、导出 Mermaid 与设计稿同构、并行支线 T/U/V 未出现 |
 | `TemplatesTest` | 8 | `${x}`、`${x:-兜底}`、"取不到保留原文"、参数渲染 |
 | `PlanParserTest` | 6 | 编号计划的容错解析（多种编号与缩进形态） |
 | `LlmAutoConfigurationTest` | 27 | 条件装配、内置 Loop、用户 bean 覆盖（记忆/压缩器/监听器）、`llm.enabled=false`、内置工具开关与沙箱联动、工具目录、自定义 Loop 注册、**协议注册表（内置四协议 / Codec bean 被收进注册表 / 同名覆盖内置 / 启动期可读失败）**、**工作流处理器注册与启动期校验** |

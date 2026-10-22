@@ -41,6 +41,7 @@ public final class WorkflowNode {
     private final boolean continueOnError;
     private final int maxSteps;
     private final List<String> choice;
+    private final NodeContext context;
 
     private WorkflowNode(Builder b) {
         this.id = b.id == null ? null : b.id.trim();
@@ -59,6 +60,7 @@ public final class WorkflowNode {
         this.continueOnError = b.continueOnError;
         this.maxSteps = b.maxSteps;
         this.choice = List.copyOf(b.choice);
+        this.context = b.context;
     }
 
     public static Builder builder(String id) {
@@ -162,6 +164,16 @@ public final class WorkflowNode {
     }
 
     /**
+     * 本节点能看到多少上文，默认 {@link NodeContext#ISOLATED}。
+     *
+     * <p>隔离时模型只收到本节点的提示词，事实全靠 {@code ${...}} 显式渲染；
+     * 共享时继承此前全部对话。见 {@link NodeContext} 里为什么把隔离作为默认。</p>
+     */
+    public NodeContext context() {
+        return context;
+    }
+
+    /**
      * 加载期校验：宁可在这里报一句清楚的话，也不要等到跑了一半才崩。
      *
      * @param where 出错位置的前缀（如 {@code 工作流 [review] 的节点 [analyze]}），便于定位
@@ -258,6 +270,7 @@ public final class WorkflowNode {
         private boolean continueOnError;
         private int maxSteps = -1;
         private final List<String> choice = new ArrayList<>();
+        private NodeContext context = NodeContext.ISOLATED;
 
         public Builder id(String id) {
             this.id = id;
@@ -347,6 +360,11 @@ public final class WorkflowNode {
             if (choice != null) {
                 this.choice.addAll(choice);
             }
+            return this;
+        }
+
+        public Builder context(NodeContext context) {
+            this.context = context == null ? NodeContext.ISOLATED : context;
             return this;
         }
 

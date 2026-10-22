@@ -214,6 +214,11 @@ public class DefaultLoopContext implements LoopContext, ToolContext {
         return doCallModel(history, systemPrompt);
     }
 
+    @Override
+    public ChatResponse callModel(List<ChatMessage> history, String systemSuffix) {
+        return doCallModel(history, mergeSystem(systemPrompt, systemSuffix));
+    }
+
     /**
      * 合并本次调用实际要用的系统提示词：Agent 级在前，节点级在后。
      *

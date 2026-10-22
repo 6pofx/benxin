@@ -213,6 +213,10 @@ class OrderApprovalFlowTest {
                 "A", "B", "C", "D", "E", "E2", "F", "I", "I1",
                 "D", "E", "E2", "F", "G", "L", "M", "K", "O", "P", "Q");
         assertThat(result.text()).isEqualTo("【审核通过】生成审核通过通知｜进入履约/发货流程");
+        // 20 个节点跑下来，每次模型请求都只有一条用户消息：上下文没有随图增长
+        assertThat(model.requests()).allSatisfy(request -> assertThat(request.messages())
+                .filteredOn(m -> m.role() == com.benxin.llm.core.message.Role.USER)
+                .hasSize(1));
     }
 
     @Test

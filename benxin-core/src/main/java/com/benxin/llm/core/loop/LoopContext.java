@@ -115,6 +115,18 @@ public interface LoopContext {
     }
 
     /**
+     * 用<b>给定历史</b>调一次模型（不追加响应），并额外追加一段系统提示词。
+     *
+     * <p>给"上下文隔离的节点"用：这类节点不该把整段对话发上去，但要自己维护一份局部历史
+     * （节点内部的工具往返仍要累积），因此需要"自带历史 + 自带系统提示词"的组合。</p>
+     *
+     * <p>默认实现忽略 {@code systemSuffix} 并退化为 {@link #callModel(List)}。</p>
+     */
+    default ChatResponse callModel(List<ChatMessage> history, String systemSuffix) {
+        return callModel(history);
+    }
+
+    /**
      * 执行模型请求的一批工具调用，返回可直接追加进历史的结果消息。
      * 内部完成：沙箱校验 → 审批 → 拦截器 → 执行 → 超时与截断 → 事件广播。
      */

@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 工作流执行引擎：按图推进节点，直到走到 END、走出死胡同、或耗尽步数预算。
@@ -273,8 +275,12 @@ public final class WorkflowEngine {
                         : state.render(node.prompt());
                 yield Outcome.of(text);
             }
-            case AGENT -> Outcome.of(runtime.callAgent(
-                    state.render(node.system()), compose(node, state), node));
+            case AGENT -> {
+                String system = state.render(node.system());
+                String prompt = compose(node, state);
+                warnUnresolved(node, prompt, system, runtime);
+                yield Outcome.of(runtime.callAgent(system, prompt, node));
+            }
             case TOOL -> {
                 Map<String, Object> args = Templates.renderArgs(node.args(), state.lookup());
                 yield Outcome.of(runtime.callTool(node.tool(), args, node));
@@ -319,8 +325,39 @@ public final class WorkflowEngine {
     }
 
     /** 把 {@code instruction} 与 {@code prompt} 渲染并拼成最终提示词。 */
-    private String compose(WorkflowNode node, WorkflowState state) {
-        String prompt = state.render(node.prompt());
+    /** 渲染后仍残留的占位符，用于把"拼错的变量名"报出来。 */
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]+)}");
+
+    /**
+     * 提示词里还有没被解析的 {@code ${...}}：变量名拼错了，或这个事实从没被写进黑板。
+     *
+     * <p>隔离节点尤其需要这条警告 —— 它没有历史可兜底，模板里少一个事实，
+     * 模型就真的只能凭空编。保留原文（而不是替换成空串）只是让它"看得见"，
+     * 还得把"看见了什么"报出来。</p>
+     */
+    private void warnUnresolved(WorkflowNode node, String prompt, String system, WorkflowRuntime runtime) {
+        List<String> names = new ArrayList<>();
+        collectUnresolved(prompt, names);
+        collectUnresolved(system, names);
+        if (!names.isEmpty()) {
+            runtime.emit("workflow.unresolved-variable", Map.of("node", node.id(), "names", names));
+        }
+    }
+
+    private static void collectUnresolved(String text, List<String> into) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        Matcher matcher = PLACEHOLDER.matcher(text);
+        while (matcher.find()) {
+            String name = matcher.group(1).trim();
+            if (!name.isEmpty() && !into.contains(name)) {
+                into.add(name);
+            }
+        }
+    }
+
+    private String compose(WorkflowNode node, WorkflowState state) {        String prompt = state.render(node.prompt());
         if (node.instruction() == null || node.instruction().isBlank()) {
             return prompt;
         }

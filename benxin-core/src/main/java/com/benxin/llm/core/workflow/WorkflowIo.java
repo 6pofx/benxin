@@ -215,6 +215,9 @@ public final class WorkflowIo {
             if (!node.choice().isEmpty()) {
                 item.put("choice", node.choice());
             }
+            if (node.context() != NodeContext.ISOLATED) {
+                item.put("context", node.context().wireName());
+            }
             putIfPresent(item, "tool", node.tool());
             putIfPresent(item, "handler", node.handler());
             if (!node.args().isEmpty()) {

@@ -124,6 +124,19 @@ public final class JavaFlow {
                 .system(system).prompt(prompt).choice(List.of(choices)));
     }
 
+    /**
+     * 继承此前全部对话的 agent 节点（{@link NodeContext#SHARED}）。
+     *
+     * <p>默认的 {@link #agent} 是<b>隔离</b>的：模型只看得到本条提示词，事实全靠
+     * {@code ${...}} 显式传。只有确实需要"接着上面那段话往下说"时才用这个 ——
+     * 代价是提示词随历史变化、长流程会撞上下文预算、行为不再可复现。</p>
+     */
+    public JavaFlow agentShared(String id, String system, String prompt, String... choices) {
+        return add(WorkflowNode.builder(id).type(NodeType.AGENT)
+                .system(system).prompt(prompt).choice(List.of(choices))
+                .context(NodeContext.SHARED));
+    }
+
     /** 直接调一个已注册的工具，不经过模型。 */
     public JavaFlow tool(String id, String tool) {
         return add(WorkflowNode.builder(id).type(NodeType.TOOL).tool(tool));
@@ -225,6 +238,7 @@ public final class JavaFlow {
                 .continueOnError(node.continueOnError())
                 .maxSteps(node.maxSteps())
                 .choice(node.choice())
+                .context(node.context())
                 .build();
     }
 

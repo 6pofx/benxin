@@ -9,12 +9,14 @@ import com.benxin.llm.core.tool.ToolCallback;
 import com.benxin.llm.core.tool.ToolResult;
 import com.benxin.llm.core.util.Json;
 import com.benxin.llm.core.workflow.ChoiceContract;
+import com.benxin.llm.core.workflow.NodeContext;
 import com.benxin.llm.core.workflow.NodeInput;
 import com.benxin.llm.core.workflow.NodeOutput;
 import com.benxin.llm.core.workflow.WorkflowHandlerRegistry;
 import com.benxin.llm.core.workflow.WorkflowNode;
 import com.benxin.llm.core.workflow.WorkflowRuntime;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,8 +61,20 @@ public final class LoopContextRuntime implements WorkflowRuntime {
 
     @Override
     public String callAgent(String system, String prompt, WorkflowNode node) {
-        ctx.append(ChatMessage.user(prompt));
-        String text = runAgentTurns(system, node);
+        // 隔离（默认）：本节点从一张白纸开始，只看得到自己那条提示词。
+        // 一切"上文"都必须由调用方通过 ${...} 显式渲染进来 —— 这正是
+        // "该传的事实用变量传"落到代码上的样子，也保证提示词与历史无关、可复现。
+        boolean isolated = node.context() == NodeContext.ISOLATED;
+        List<ChatMessage> history;
+        if (isolated) {
+            history = new ArrayList<>();
+            history.add(ChatMessage.user(prompt));
+        } else {
+            ctx.append(ChatMessage.user(prompt));
+            history = ctx.messages();
+        }
+
+        String text = runAgentTurns(system, node, history, isolated);
 
         List<String> choices = node.choice();
         if (choices.isEmpty()) {
@@ -85,8 +99,13 @@ public final class LoopContextRuntime implements WorkflowRuntime {
                     "attempt", attempt + 1,
                     "allowed", choices,
                     "raw", Json.abbreviate(text)));
-            ctx.append(ChatMessage.user(ChoiceContract.correction(choices)));
-            text = runAgentTurns(system, node);
+            ChatMessage correction = ChatMessage.user(ChoiceContract.correction(choices));
+            if (isolated) {
+                history.add(correction);
+            } else {
+                ctx.append(correction);
+            }
+            text = runAgentTurns(system, node, history, isolated);
         }
     }
 
@@ -95,17 +114,20 @@ public final class LoopContextRuntime implements WorkflowRuntime {
      *
      * <p>抽出来是为了让输出契约的纠正重试能复用同一段推进逻辑 ——
      * 重试时不应该再追加一遍原始提示词（它已经在历史里了），只追加纠正消息。</p>
+     *
+     * @param history 本次调用使用的历史：隔离节点是局部列表，共享节点就是 {@code ctx.messages()}
      */
-    private String runAgentTurns(String system, WorkflowNode node) {
+    private String runAgentTurns(String system, WorkflowNode node, List<ChatMessage> history,
+                                 boolean isolated) {
         int nodeLimit = node.maxSteps() > 0 ? node.maxSteps() : Integer.MAX_VALUE;
         int calls = 0;
 
         while (calls < nodeLimit) {
             if (outOfBudget()) {
                 // 全局预算见底：不再多要一次模型调用，直接用已有的最后一句话收场
-                return lastAssistantText();
+                return lastAssistantText(history);
             }
-            ChatResponse response = callModel(system);
+            ChatResponse response = isolated ? callModelIn(system, history) : callModel(system);
             calls++;
             noteTruncation(response, node);
             if (response.message() == null) {
@@ -117,7 +139,11 @@ public final class LoopContextRuntime implements WorkflowRuntime {
             }
 
             List<ChatMessage> results = ctx.executeTools(toolUses);
-            results.forEach(ctx::append);
+            if (isolated) {
+                history.addAll(results);
+            } else {
+                results.forEach(ctx::append);
+            }
 
             Optional<String> direct = directAnswer(toolUses, results);
             if (direct.isPresent()) {
@@ -128,14 +154,33 @@ public final class LoopContextRuntime implements WorkflowRuntime {
         // 节点级工具轮次用尽：给它一次"收口"的机会，否则节点输出会是空的，
         // 后续依赖 ${本节点} 的提示词就会变残缺。
         if (!outOfBudget()) {
-            ctx.append(ChatMessage.user("本步骤的工具调用次数已达上限，请直接根据已有信息给出结论，不要再调用工具。"));
-            ChatResponse wrapUp = callModel(system);
-            noteTruncation(wrapUp, node);
-            if (wrapUp.message() != null) {
-                return wrapUp.message().text();
+            ChatMessage wrapUp = ChatMessage.user("本步骤的工具调用次数已达上限，请直接根据已有信息给出结论，不要再调用工具。");
+            if (isolated) {
+                history.add(wrapUp);
+            } else {
+                ctx.append(wrapUp);
+            }
+            ChatResponse response = isolated ? callModelIn(system, history) : callModel(system);
+            noteTruncation(response, node);
+            if (response.message() != null) {
+                return response.message().text();
             }
         }
-        return lastAssistantText();
+        return lastAssistantText(history);
+    }
+
+    /**
+     * 隔离模式下一次模型调用：自带历史 + 自带系统提示词，响应只进局部历史。
+     *
+     * <p>注意它<b>不会</b>污染 {@code ctx.messages()} —— 隔离节点的整段推理
+     * （含工具往返）对后续节点不可见，它们能拿到的只有引擎写回黑板的最终输出。</p>
+     */
+    private ChatResponse callModelIn(String system, List<ChatMessage> history) {
+        ChatResponse response = ctx.callModel(history, system);
+        if (response.message() != null) {
+            history.add(response.message());
+        }
+        return response;
     }
 
     /**
@@ -217,7 +262,11 @@ public final class LoopContextRuntime implements WorkflowRuntime {
     }
 
     private String lastAssistantText() {
-        List<ChatMessage> messages = ctx.messages();
+        return lastAssistantText(ctx.messages());
+    }
+
+    /** 在一份给定历史里找最后一条非空 assistant 文本（隔离节点用局部历史）。 */
+    private String lastAssistantText(List<ChatMessage> messages) {
         for (int i = messages.size() - 1; i >= 0; i--) {
             ChatMessage message = messages.get(i);
             if (message.role() == Role.ASSISTANT && !message.text().isBlank()) {
