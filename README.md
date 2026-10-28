@@ -15,7 +15,7 @@ public interface WeatherAssistant {
 ```
 
 > **想看完整示例？** 示例应用**不在本仓库** —— 配套仓库 [**`benxin_example`**](https://github.com/6pofx/benxin_example)
-> 用 12 个可独立运行的 Spring Boot 子项目、794 个离线用例，把下面每一个切面都演示了一遍。
+> 用 14 个可独立运行的 Spring Boot 子项目、848 个离线用例，把下面每一个切面都演示了一遍。
 
 ---
 
@@ -1186,13 +1186,13 @@ benxin/
 
 本仓库只含两个库模块：`benxin-core` 与 `benxin-spring-boot-starter`。
 **可运行的示例应用独立成一个仓库** —— [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)：
-12 个可独立启动的 Spring Boot 子项目 + 1 个共享的离线基础设施模块，
-**794 个 `@SpringBootTest` 用例**把它演示的每一句话都钉成回归断言，默认离线、零 token。
+14 个可独立启动的 Spring Boot 子项目 + 1 个共享的离线基础设施模块，
+**848 个 `@SpringBootTest` 用例**把它演示的每一句话都钉成回归断言，默认离线、零 token。
 
 ```bash
 git clone https://github.com/6pofx/benxin_example.git
 cd benxin_example
-mvn test                             # 794 个用例，默认离线、零 token
+mvn test                             # 848 个用例，默认离线、零 token
 cd exp-01-declarative-agent
 mvn spring-boot:run                  # 任意子项目都能单独启动
 ```
@@ -1205,8 +1205,15 @@ mvn spring-boot:run                  # 任意子项目都能单独启动
 上下文压缩与分词估算、监听器与拦截器全回调、逐个切面的 bean 覆盖、MySQL 持久化、
 真实 DeepSeek 联调，以及本机小模型（LM Studio + Qwen3-VL）的**视觉**演示。
 
+其中两条新能力有专门的示例模块，可以直接照着看：
+
+| 能力 | 示例模块 |
+|---|---|
+| 工作流 **`java` 节点**（`@LlmNode` 注册制、两条输出通道、失败语义） | [`exp-13-workflow-java-node`](https://github.com/6pofx/benxin_example/tree/main/exp-13-workflow-java-node) |
+| **代码编排 `flow`**（`JavaFlow` + 输出契约 `choice` + Mermaid 导出） | [`exp-14-expense-approval-flow`](https://github.com/6pofx/benxin_example/tree/main/exp-14-expense-approval-flow) ——真实业务：差旅报销审批 |
+
 > 这个工程同时是 1.1.1 这轮修复的来源：它实测上报了 31 条缺陷（本版本修复了 30 条），
-> 修复后对应断言被翻转成"钉住新行为"，因此那 794 个用例现在也是本项目的兼容性回归套件。
+> 修复后对应断言被翻转成"钉住新行为"，因此那 848 个用例现在也是本项目的兼容性回归套件。
 
 **示例为什么不放在本仓库里？** 库的发布产物只有两个 jar，而示例要跟着演示需求频繁改动、
 还要能引用任意历史版本做升级回归。放在同一个 reactor 里会让"引用这个库"与"跑这个 demo"耦合；
@@ -1271,7 +1278,7 @@ Anthropic 用 `input_json_delta`，Gemini 则一次性给全。把这种协议�
 | **`describe(id, …)`** | 给节点补一句说明：只影响导出的图与可读性，不参与任何运行时语义 |
 | **节点上下文默认隔离** | `NodeContext.ISOLATED`（默认）：agent 节点只看得到自己那条提示词，事实必须靠 `${...}` 显式传；`agentShared(...)` / `context: shared` 才继承整段对话。附 `workflow.unresolved-variable` 事件，把拼错的变量名报出来 |
 | **工作流 Java 节点** | `type: java` + `handler`，把本地逻辑放进图里（见[工作流模式](#一声明式workflow--图写在-yaml-里)） |
-| **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（12 个子项目 / 794 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
+| **示例模块迁出** | 移除 `benxin-examples`。可运行示例独立为 [**`6pofx/benxin_example`**](https://github.com/6pofx/benxin_example)（14 个子项目 / 848 个用例），本仓库只剩两个库模块；`mvn -o test` 的用例数由 276 变为 **260**（减掉的是示例应用的 16 个装配测试）。 |
 | **F-47：输出被 `max_tokens` 截断时不再是"一点声音都没有"** | 以前 `FinishReason.LENGTH` 被解析出来、放进 `AgentResult`，然后**没有任何消费点**（不记日志、不进事件、不进 attributes）。现在：① `DefaultLoopContext` 见到 LENGTH 打 WARN，写明 `max-tokens`、本次输出 token、正文是否为空，以及"重试/补写救不回来，约束是 token 预算本身"；② 运行属性写入 `benxin.truncated` / `benxin.truncatedSteps`；③ 广播 `model.truncated` 事件。**工作流**另有节点级信号：`WorkflowRun.truncatedNodes()` / `hasTruncatedNodes()`、`workflow.node-truncated` 事件、`workflow.end` 事件里带 `truncatedNodes` —— 并修掉了"只保留最后一次响应的结束原因，中间节点被截断事后完全查不出来" |
 
 实测环境（本地 LM Studio，`qwen/qwen3-vl-8b`，`max-tokens: 64`）：
